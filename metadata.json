@@ -1,0 +1,6 @@
+{
+  "name": "Tile Match Level Builder & Analyzer",
+  "description": "Professional level editor, balance analyzer, and testing engine for tile-matching puzzle games.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
