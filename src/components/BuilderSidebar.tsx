@@ -7,7 +7,7 @@ import {
   Tile, DifficultyMod, ThemeWeights, IconPoolEntry, ThemeIconRegistry,
   BoosterAvailability, DifficultyStats, TileCluster,
   BoardMorphismConfig, TileSpectrumEntry, TileSpectrumBenefit, TileSpectrumDuration,
-  EditorTool
+  EditorTool, BoardTimerConfig, BoardRandomConfig, BossBattleConfig, SweetDeliveryConfig
 } from '../types/game';
 import {
   ALL_THEMES, THEME_DOT_COLORS, MECHANICS, GIFT_LAYERS, GIFT_SIZES,
@@ -74,6 +74,14 @@ interface BuilderSidebarProps {
   setBoardMorphism: React.Dispatch<React.SetStateAction<BoardMorphismConfig>>;
   tileSpectrums: TileSpectrumEntry[];
   setTileSpectrums: React.Dispatch<React.SetStateAction<TileSpectrumEntry[]>>;
+  boardTimer: BoardTimerConfig;
+  setBoardTimer: React.Dispatch<React.SetStateAction<BoardTimerConfig>>;
+  boardRandom: BoardRandomConfig;
+  setBoardRandom: React.Dispatch<React.SetStateAction<BoardRandomConfig>>;
+  bossBattle: BossBattleConfig;
+  setBossBattle: React.Dispatch<React.SetStateAction<BossBattleConfig>>;
+  sweetDelivery: SweetDeliveryConfig;
+  setSweetDelivery: React.Dispatch<React.SetStateAction<SweetDeliveryConfig>>;
   boosterPreset: string;
   setBoosterPreset: (preset: string) => void;
   boosterCustom: BoosterAvailability;
@@ -266,6 +274,14 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
   setBoardMorphism,
   tileSpectrums,
   setTileSpectrums,
+  boardTimer,
+  setBoardTimer,
+  boardRandom,
+  setBoardRandom,
+  bossBattle,
+  setBossBattle,
+  sweetDelivery,
+  setSweetDelivery,
   boosterPreset,
   setBoosterPreset,
   boosterCustom,
@@ -1364,6 +1380,171 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
                 <p className="text-[9px] text-amber-400 italic text-center">
                   Maximum 3 Tiles-spectrum applied per level reached.
                 </p>
+              )}
+            </div>
+
+            {/* 3. Board Timer */}
+            <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-200 flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={boardTimer.enabled}
+                    onChange={(e) => setBoardTimer(prev => ({ ...prev, enabled: e.target.checked }))}
+                    className="rounded border-slate-700 text-purple-500 focus:ring-purple-400 cursor-pointer"
+                  />
+                  <span>Board Timer</span>
+                </label>
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${boardTimer.enabled ? 'bg-purple-900 text-purple-200 border border-purple-600' : 'bg-slate-800 text-slate-500'}`}>
+                  {boardTimer.enabled ? 'Active' : 'Off'}
+                </span>
+              </div>
+
+              {boardTimer.enabled && (
+                <div className="space-y-2 pt-1 border-t border-slate-800/80 text-[10px] animate-in fade-in duration-150">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-300">Level Duration (seconds):</span>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        min="10"
+                        max="600"
+                        step="5"
+                        value={boardTimer.duration}
+                        onChange={(e) => setBoardTimer(prev => ({ ...prev, duration: Math.max(10, parseInt(e.target.value) || 60) }))}
+                        className="w-16 bg-slate-900 text-purple-300 font-bold font-mono text-center rounded border border-slate-700 text-xs py-0.5 outline-none"
+                      />
+                      <span>sec</span>
+                    </div>
+                  </div>
+                  <div className="flex gap-1">
+                    {[30, 60, 120, 180].map(sec => (
+                      <button
+                        key={sec}
+                        type="button"
+                        onClick={() => setBoardTimer(prev => ({ ...prev, duration: sec }))}
+                        className={`flex-1 py-0.5 rounded text-[9px] font-mono border transition-colors cursor-pointer ${
+                          boardTimer.duration === sec
+                            ? 'bg-purple-600 text-white border-purple-400 font-bold'
+                            : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+                        }`}
+                      >
+                        {sec}s
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[9px] text-purple-400 italic">
+                    Affects level difficulty directly: shorter times increase the raw challenge score multiplier!
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* 4. Board Random */}
+            <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-200 flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={boardRandom.enabled}
+                    onChange={(e) => setBoardRandom(prev => ({ ...prev, enabled: e.target.checked }))}
+                    className="rounded border-slate-700 text-purple-500 focus:ring-purple-400 cursor-pointer"
+                  />
+                  <span>Board Random</span>
+                </label>
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${boardRandom.enabled ? 'bg-purple-900 text-purple-200 border border-purple-600' : 'bg-slate-800 text-slate-500'}`}>
+                  {boardRandom.enabled ? 'Active' : 'Off'}
+                </span>
+              </div>
+
+              {boardRandom.enabled && (
+                <div className="space-y-2 pt-1 border-t border-slate-800/80 text-[10px] animate-in fade-in duration-150">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-300">Reshuffle Interval:</span>
+                    <select
+                      value={boardRandom.interval}
+                      onChange={(e) => setBoardRandom(prev => ({ ...prev, interval: (parseInt(e.target.value) || 10) as 5 | 10 | 15 }))}
+                      className="bg-slate-900 text-purple-300 border border-slate-700 rounded px-1.5 py-0.5 text-xs font-bold cursor-pointer"
+                    >
+                      <option value={5}>Every 5 matches</option>
+                      <option value={10}>Every 10 matches</option>
+                      <option value={15}>Every 15 matches</option>
+                    </select>
+                  </div>
+                  <p className="text-[9px] text-purple-400 italic">
+                    Shuffles all tile coordinates and icons randomly after every {boardRandom.interval} matches!
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* 5. BOSS Battle */}
+            <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-200 flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={bossBattle.enabled}
+                    disabled={sweetDelivery.enabled}
+                    onChange={(e) => setBossBattle(prev => ({ ...prev, enabled: e.target.checked }))}
+                    className="rounded border-slate-700 text-purple-500 focus:ring-purple-400 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  />
+                  <span className={sweetDelivery.enabled ? 'text-slate-500 line-through' : ''}>BOSS Battle</span>
+                </label>
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${bossBattle.enabled ? 'bg-purple-900 text-purple-200 border border-purple-600' : 'bg-slate-800 text-slate-500'}`}>
+                  {bossBattle.enabled ? 'Active' : 'Off'}
+                </span>
+              </div>
+
+              {bossBattle.enabled && (
+                <div className="space-y-2 pt-1 border-t border-slate-800/80 text-[10px] animate-in fade-in duration-150">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-300">Boss Max HP:</span>
+                    <input
+                      type="number"
+                      min="20"
+                      max="1000"
+                      step="10"
+                      value={bossBattle.maxHP}
+                      onChange={(e) => setBossBattle(prev => ({ ...prev, maxHP: Math.max(20, parseInt(e.target.value) || 100) }))}
+                      className="w-16 bg-slate-900 text-purple-300 font-bold font-mono text-center rounded border border-slate-700 text-xs py-0.5 outline-none"
+                    />
+                  </div>
+                  <ul className="text-[9px] text-purple-400 space-y-1 list-disc pl-3">
+                    <li>Tray max size reduced by 2 (max 5 slots).</li>
+                    <li>Each matched triplet inflicts damage (depletes Boss HP).</li>
+                    <li>Full tray returns 3 tiles to grid, triggers shuffle, and costs -25% Player HP instead of a Game Over.</li>
+                  </ul>
+                </div>
+              )}
+            </div>
+
+            {/* 6. Sweet Delivery Challenge */}
+            <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-200 flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={sweetDelivery.enabled}
+                    disabled={bossBattle.enabled}
+                    onChange={(e) => setSweetDelivery(prev => ({ ...prev, enabled: e.target.checked }))}
+                    className="rounded border-slate-700 text-purple-500 focus:ring-purple-400 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  />
+                  <span className={bossBattle.enabled ? 'text-slate-500 line-through' : ''}>Sweet Delivery</span>
+                </label>
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${sweetDelivery.enabled ? 'bg-purple-900 text-purple-200 border border-purple-600' : 'bg-slate-800 text-slate-500'}`}>
+                  {sweetDelivery.enabled ? 'Active' : 'Off'}
+                </span>
+              </div>
+
+              {sweetDelivery.enabled && (
+                <div className="space-y-1 pt-1 border-t border-slate-800/80 text-[10px] animate-in fade-in duration-150">
+                  <ul className="text-[9px] text-purple-400 space-y-1 list-disc pl-3">
+                    <li>Tray max size reduced by 2 (max 5 slots).</li>
+                    <li>Displays 4 active orders (lists of 3 identical tiles required).</li>
+                    <li>Complete all 4 orders to win the game!</li>
+                  </ul>
+                </div>
               )}
             </div>
           </div>

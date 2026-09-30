@@ -346,6 +346,43 @@ export const AnalyticsPanel: React.FC<AnalyticsPanelProps> = ({
                   )}
                 </div>
               </MetricRowWithTooltip>
+
+              {difficultyStats.boardSpecialMechanics && (
+                <MetricRowWithTooltip
+                  label="Board's Special Mechanics"
+                  value={difficultyStats.boardSpecialMechanics.total}
+                  detail="Timer, Shuffle, Boss, Delivery"
+                  isOpen={activeTooltip === 'boardMechanics'}
+                  onToggle={() => setActiveTooltip(activeTooltip === 'boardMechanics' ? null : 'boardMechanics')}
+                >
+                  <div className="space-y-1">
+                    <div className="flex justify-between items-center text-[11px]">
+                      <span className="text-slate-300 font-medium font-sans">Board Timer Countdown</span>
+                      <span className={`font-mono text-[11px] ${difficultyStats.boardSpecialMechanics.timerScore > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
+                        {difficultyStats.boardSpecialMechanics.timerScore > 0 ? `+${difficultyStats.boardSpecialMechanics.timerScore.toFixed(2)}` : '0.00'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center text-[11px]">
+                      <span className="text-slate-300 font-medium font-sans">Board Shuffling Relief</span>
+                      <span className={`font-mono text-[11px] ${difficultyStats.boardSpecialMechanics.randomScore !== 0 ? 'text-green-400' : 'text-slate-500'}`}>
+                        {difficultyStats.boardSpecialMechanics.randomScore !== 0 ? `${difficultyStats.boardSpecialMechanics.randomScore.toFixed(2)}` : '0.00'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center text-[11px]">
+                      <span className="text-slate-300 font-medium font-sans">BOSS Battle (Tray Capped)</span>
+                      <span className={`font-mono text-[11px] ${difficultyStats.boardSpecialMechanics.bossScore > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
+                        {difficultyStats.boardSpecialMechanics.bossScore > 0 ? `+${difficultyStats.boardSpecialMechanics.bossScore.toFixed(2)}` : '0.00'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center text-[11px]">
+                      <span className="text-slate-300 font-medium font-sans">Sweet Delivery Challenge</span>
+                      <span className={`font-mono text-[11px] ${difficultyStats.boardSpecialMechanics.deliveryScore > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
+                        {difficultyStats.boardSpecialMechanics.deliveryScore > 0 ? `+${difficultyStats.boardSpecialMechanics.deliveryScore.toFixed(2)}` : '0.00'}
+                      </span>
+                    </div>
+                  </div>
+                </MetricRowWithTooltip>
+              )}
             </div>
 
             <div className="mt-4 pt-3 border-t border-slate-800 text-[11px] space-y-1 bg-slate-950/40 p-3 rounded-lg border border-slate-800">

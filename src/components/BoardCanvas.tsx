@@ -4,7 +4,8 @@ import {
   ArrowUp, ArrowDown, ArrowLeft, ArrowRight, X, Sparkles, ChevronUp, ChevronDown, Wand2
 } from 'lucide-react';
 import {
-  Tile, BoosterAvailability, TileCluster, BoardMorphismConfig, TileSpectrumEntry, EditorTool
+  Tile, BoosterAvailability, TileCluster, BoardMorphismConfig, TileSpectrumEntry, EditorTool,
+  BoardTimerConfig, BossBattleConfig, SweetDeliveryConfig
 } from '../types/game';
 import {
   INTRINSIC_BOARD_SIZE, STACK_OFFSET_PX, GIFT_SIZES,
@@ -44,6 +45,16 @@ interface BoardCanvasProps {
   selectedCombineShapeId?: string;
   boardMorphism?: BoardMorphismConfig;
   tileSpectrums?: TileSpectrumEntry[];
+  boardTimer?: BoardTimerConfig;
+  timeLeft?: number;
+  bossBattle?: BossBattleConfig;
+  bossHP?: number;
+  playerHP?: number;
+  sweetDelivery?: SweetDeliveryConfig;
+  completedOrders?: string[];
+  hasRevivedThisRun?: boolean;
+  onRevive?: () => void;
+  onAddTime?: () => void;
   // Clusters
   clusters?: TileCluster[];
   setClusters?: React.Dispatch<React.SetStateAction<TileCluster[]>>;
@@ -84,6 +95,16 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
   selectedCombineShapeId,
   boardMorphism,
   tileSpectrums = [],
+  boardTimer,
+  timeLeft = 60,
+  bossBattle,
+  bossHP = 100,
+  playerHP = 100,
+  sweetDelivery,
+  completedOrders = [],
+  hasRevivedThisRun = false,
+  onRevive,
+  onAddTime,
   clusters = [],
   setClusters,
   clusterSelectionMode = null,
@@ -109,6 +130,51 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
   const [notificationMsg, setNotificationMsg] = useState<string | null>(null);
 
   const targetLayer = giftPlacementMode ? activeGiftLayer : activeLayer;
+
+  const getMorphismCoords = (tileX: number, tileY: number, wPx: number, hPx: number) => {
+    let x = tileX * 20;
+    let y = tileY * 20;
+    let w = wPx;
+    let h = hPx;
+
+    if (isPlayMode && boardMorphism?.enabled) {
+      const cx = 240;
+      const cy = 240;
+      const tileCx = x + w / 2;
+      const tileCy = y + h / 2;
+
+      let x0 = tileCx - cx;
+      let y0 = tileCy - cy;
+
+      if (boardMorphism.mirroredHorizons) {
+        x0 = -x0;
+      }
+
+      let x1 = x0;
+      let y1 = y0;
+      const angle = (boardMorphism.spinAngle || 0) % 360;
+
+      if (angle === 90 || angle === -270) {
+        x1 = -y0;
+        y1 = x0;
+        w = hPx;
+        h = wPx;
+      } else if (angle === 180 || angle === -180) {
+        x1 = -x0;
+        y1 = -y0;
+      } else if (angle === 270 || angle === -90) {
+        x1 = y0;
+        y1 = -x0;
+        w = hPx;
+        h = wPx;
+      }
+
+      x = x1 + cx - w / 2;
+      y = y1 + cy - h / 2;
+    }
+
+    return { x, y, w, h };
+  };
 
   useEffect(() => {
     const updateWidth = () => {
@@ -533,6 +599,17 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
     let bgColor = isEdit ? 'bg-slate-600' : '';
     let borderColor = isEdit ? 'border-slate-800' : '';
 
+    const widthPx = tile.isGift
+      ? ((((GIFT_SIZES[tile.mechanic || 'gift2x2']?.cols || tile.giftCols || 2) - 1) * 20) + 40 - 4)
+      : 40;
+    const heightPx = tile.isGift
+      ? ((((GIFT_SIZES[tile.mechanic || 'gift2x2']?.rows || tile.giftRows || 2) - 1) * 20) + 40 - 4)
+      : 40;
+
+    const dragGx = isSelected && isDraggingMove ? dragMoveDelta.dx : 0;
+    const dragGy = isSelected && isDraggingMove ? dragMoveDelta.dy : 0;
+    const pos = getMorphismCoords(tile.x + dragGx, tile.y + dragGy, widthPx, heightPx);
+
     if (tile.isGift) {
       const size = GIFT_SIZES[tile.mechanic || 'gift2x2'] || { cols: tile.giftCols || 2, rows: tile.giftRows || 2 };
       const activeBoard = isPlayMode ? playTiles : tiles;
@@ -553,12 +630,7 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
         if (isHiddenByLayerView) return null;
       }
 
-      const widthPx = (size.cols - 1) * 20 + 40 - 4;
-      const heightPx = (size.rows - 1) * 20 + 40 - 4;
       const baseZIndex = Math.floor(tile.z) * 10 + 5;
-
-      const dragDisplaceX = isSelected && isDraggingMove ? dragMoveDelta.dx * 20 : 0;
-      const dragDisplaceY = isSelected && isDraggingMove ? dragMoveDelta.dy * 20 : 0;
 
       if (!isPlayMode) {
         return (
@@ -586,10 +658,10 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
               ${isSelected ? 'ring-4 ring-cyan-400 ring-offset-2 ring-offset-slate-950 shadow-[0_0_20px_rgba(34,211,238,0.8)] z-50 scale-102' : ''}
             `}
             style={{
-              left: `${tile.x * 20 + dragDisplaceX}px`,
-              top: `${tile.y * 20 + dragDisplaceY}px`,
-              width: `${widthPx}px`,
-              height: `${heightPx}px`,
+              left: `${pos.x}px`,
+              top: `${pos.y}px`,
+              width: `${pos.w}px`,
+              height: `${pos.h}px`,
               zIndex: isSelected ? 100 : tile.z * 10,
               transform: `translateY(${stackDepth * -STACK_OFFSET_PX}px)`,
               boxShadow: stackDepth > 0
@@ -628,18 +700,20 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
               border-2 border-dashed border-amber-950/50 
               bg-slate-950/80 backdrop-blur-[2px]"
             style={{
-              left: `${tile.x * 20 + 2}px`,
-              top: `${tile.y * 20 + 2}px`,
-              width: `${widthPx}px`,
-              height: `${heightPx}px`,
+              left: `${pos.x + 2}px`,
+              top: `${pos.y + 2}px`,
+              width: `${pos.w}px`,
+              height: `${pos.h}px`,
               zIndex: baseZIndex,
               filter: 'brightness(0.3) saturate(0.5)'
             }}
           >
-            <Gift className="w-6 h-6 text-slate-800 mx-auto mt-1" />
-            <span className="absolute bottom-0.5 right-0.5 text-[9px] font-bold text-slate-700">
-              {size.cols}×{size.rows}
-            </span>
+            <div className="w-full h-full relative flex items-center justify-center">
+              <Gift className="w-6 h-6 text-slate-800 mx-auto mt-1" />
+              <span className="absolute bottom-0.5 right-0.5 text-[9px] font-bold text-slate-700">
+                {size.cols}×{size.rows}
+              </span>
+            </div>
           </div>
         );
       }
@@ -652,23 +726,24 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
             border-2 border-yellow-200
             animate-pulse"
           style={{
-            left: `${tile.x * 20 + 2}px`,
-            top: `${tile.y * 20 + 2}px`,
-            width: `${widthPx}px`,
-            height: `${heightPx}px`,
+            left: `${pos.x + 2}px`,
+            top: `${pos.y + 2}px`,
+            width: `${pos.w}px`,
+            height: `${pos.h}px`,
             zIndex: baseZIndex,
             boxShadow: '0 0 30px rgba(251, 191, 36, 0.95), 0 0 60px rgba(251, 191, 36, 0.5), 0 0 90px rgba(251, 191, 36, 0.3)'
           }}
         >
-          <div className="absolute -top-2 -left-2 text-yellow-200 text-lg animate-ping">✦</div>
-          <div className="absolute -top-2 -right-2 text-yellow-200 text-lg animate-ping" style={{ animationDelay: '150ms' }}>✦</div>
-          <div className="absolute -bottom-2 -left-2 text-yellow-200 text-lg animate-ping" style={{ animationDelay: '300ms' }}>✦</div>
-          <div className="absolute -bottom-2 -right-2 text-yellow-200 text-lg animate-ping" style={{ animationDelay: '450ms' }}>✦</div>
-
-          <Gift className="w-8 h-8 text-white drop-shadow-lg relative z-10" strokeWidth={2.5} />
-          <span className="absolute bottom-1 right-1 text-[10px] font-black text-white drop-shadow z-10">
-            {size.cols}×{size.rows}
-          </span>
+          <div className="w-full h-full relative flex items-center justify-center animate-pulse">
+            <div className="absolute -top-2 -left-2 text-yellow-200 text-lg animate-ping">✦</div>
+            <div className="absolute -top-2 -right-2 text-yellow-200 text-lg animate-ping" style={{ animationDelay: '150ms' }}>✦</div>
+            <div className="absolute -bottom-2 -left-2 text-yellow-200 text-lg animate-ping" style={{ animationDelay: '300ms' }}>✦</div>
+            <div className="absolute -bottom-2 -right-2 text-yellow-200 text-lg animate-ping" style={{ animationDelay: '450ms' }}>✦</div>
+            <Gift className="w-8 h-8 text-white drop-shadow-lg relative z-10" strokeWidth={2.5} />
+            <span className="absolute bottom-1 right-1 text-[10px] font-black text-white drop-shadow z-10">
+              {size.cols}×{size.rows}
+            </span>
+          </div>
         </div>
       );
     }
@@ -762,9 +837,6 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
       (s.targetType === 'icon' && tile.baseIcon === s.targetValue)
     );
 
-    const dragDisplaceX = isSelected && isDraggingMove ? dragMoveDelta.dx * 20 : 0;
-    const dragDisplaceY = isSelected && isDraggingMove ? dragMoveDelta.dy * 20 : 0;
-
     return (
       <div
         key={tile.id}
@@ -786,7 +858,7 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
           }
           handleTileClick(tile);
         }}
-        className={`absolute w-10 h-10 rounded-lg shadow-md flex items-center justify-center cursor-pointer transition-all duration-200
+        className={`absolute rounded-lg shadow-md flex items-center justify-center cursor-pointer transition-all duration-200
           ${bgColor} ${borderColor} border-b-4
           ${isEdit && tile.z !== activeLayer ? 'opacity-40 grayscale' : 'opacity-100'}
           ${tile.mechanic === 'combined' ? 'border-emerald-400 ring-2 ring-emerald-500/80' : ''}
@@ -798,8 +870,10 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
           ${isSelected ? 'ring-4 ring-cyan-400 ring-offset-2 ring-offset-slate-950 shadow-[0_0_20px_rgba(34,211,238,0.9)] z-50 scale-105' : ''}
         `}
         style={{
-          left: `${tile.x * 20 + dragDisplaceX}px`,
-          top: `${tile.y * 20 + dragDisplaceY}px`,
+          left: `${pos.x}px`,
+          top: `${pos.y}px`,
+          width: `${pos.w}px`,
+          height: `${pos.h}px`,
           zIndex: isSelected ? 100 : (clusterSelectionMode ? (100 + tile.z * 10) : (tile.z * 10)),
           transform: `translateY(${stackDepth * -STACK_OFFSET_PX}px)`,
           boxShadow: stackDepth > 0
@@ -807,66 +881,68 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
             : undefined
         }}
       >
-        {content}
-        {overlay}
+        <div className="w-full h-full relative flex items-center justify-center">
+          {content}
+          {overlay}
 
-        {/* Selected Highlight Checkmark */}
-        {isSelected && (
-          <div
-            className="absolute -top-1.5 -left-1.5 bg-cyan-400 text-slate-950 rounded-full p-0.5 shadow-lg border border-slate-900 font-black z-30 animate-bounce"
-            title="Selected"
-          >
-            <Check className="w-3 h-3 stroke-[3]" />
-          </div>
-        )}
+          {/* Selected Highlight Checkmark */}
+          {isSelected && (
+            <div
+              className="absolute -top-1.5 -left-1.5 bg-cyan-400 text-slate-950 rounded-full p-0.5 shadow-lg border border-slate-900 font-black z-30 animate-bounce"
+              title="Selected"
+            >
+              <Check className="w-3 h-3 stroke-[3]" />
+            </div>
+          )}
 
-        {/* Cluster Selection Highlight Badge */}
-        {isClusterBuilding && (
-          <div
-            className="absolute -top-1.5 -right-1.5 bg-amber-400 text-slate-950 rounded-full p-0.5 shadow-lg border border-slate-900 font-black z-30 animate-bounce"
-            title="Selected for Cluster Group"
-          >
-            <Check className="w-3 h-3 stroke-[3]" />
-          </div>
-        )}
+          {/* Cluster Selection Highlight Badge */}
+          {isClusterBuilding && (
+            <div
+              className="absolute -top-1.5 -right-1.5 bg-amber-400 text-slate-950 rounded-full p-0.5 shadow-lg border border-slate-900 font-black z-30 animate-bounce"
+              title="Selected for Cluster Group"
+            >
+              <Check className="w-3 h-3 stroke-[3]" />
+            </div>
+          )}
 
-        {/* Cluster Badge */}
-        {tileCluster && (
-          <div
-            className="absolute -bottom-1 -left-1 text-[8px] font-extrabold text-white px-1 rounded-full shadow border border-slate-900 flex items-center gap-0.5 z-20"
-            style={{ backgroundColor: tileCluster.color }}
-            title={`Cluster: ${tileCluster.name}`}
-          >
-            <Layers className="w-2 h-2" />
-            <span>{tileCluster.name.replace('Cluster #', 'C')}</span>
-          </div>
-        )}
+          {/* Cluster Badge */}
+          {tileCluster && (
+            <div
+              className="absolute -bottom-1 -left-1 text-[8px] font-extrabold text-white px-1 rounded-full shadow border border-slate-900 flex items-center gap-0.5 z-20"
+              style={{ backgroundColor: tileCluster.color }}
+              title={`Cluster: ${tileCluster.name}`}
+            >
+              <Layers className="w-2 h-2" />
+              <span>{tileCluster.name.replace('Cluster #', 'C')}</span>
+            </div>
+          )}
 
-        {isEdit && activeThemes.length > 1 && tile.themeID && (
-          <div
-            className={`absolute -top-1 -left-1 w-2.5 h-2.5 rounded-full border border-slate-900/80 shadow-sm ${
-              THEME_DOT_COLORS[tile.themeID] || 'bg-slate-500'
-            }`}
-            title={tile.themeID}
-          />
-        )}
-        {isSpectrumTile && (
-          <div
-            className="absolute -top-1.5 -right-1.5 text-[8px] bg-purple-600 text-white rounded-full w-3.5 h-3.5 flex items-center justify-center z-20 border border-purple-300 shadow font-black animate-pulse"
-            title="Tiles-spectrum active"
-          >
-            ✨
-          </div>
-        )}
-        {tile.mechanic === 'eventItem' && (tile.movesRemaining ?? 0) > 0 && (
-          <div className={`absolute -top-1 -right-1 text-white text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center z-20 border shadow ${
-            (tile.movesRemaining ?? 0) <= 1
-              ? 'bg-red-600 border-red-300 animate-pulse'
-              : 'bg-amber-600 border-yellow-300'
-          }`}>
-            {tile.movesRemaining}
-          </div>
-        )}
+          {isEdit && activeThemes.length > 1 && tile.themeID && (
+            <div
+              className={`absolute -top-1 -left-1 w-2.5 h-2.5 rounded-full border border-slate-900/80 shadow-sm ${
+                THEME_DOT_COLORS[tile.themeID] || 'bg-slate-500'
+              }`}
+              title={tile.themeID}
+            />
+          )}
+          {isSpectrumTile && (
+            <div
+              className="absolute -top-1.5 -right-1.5 text-[8px] bg-purple-600 text-white rounded-full w-3.5 h-3.5 flex items-center justify-center z-20 border border-purple-300 shadow font-black animate-pulse"
+              title="Tiles-spectrum active"
+            >
+              ✨
+            </div>
+          )}
+          {tile.mechanic === 'eventItem' && (tile.movesRemaining ?? 0) > 0 && (
+            <div className={`absolute -top-1 -right-1 text-white text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center z-20 border shadow ${
+              (tile.movesRemaining ?? 0) <= 1
+                ? 'bg-red-600 border-red-300 animate-pulse'
+                : 'bg-amber-600 border-yellow-300'
+            }`}>
+              {tile.movesRemaining}
+            </div>
+          )}
+        </div>
       </div>
     );
   };
@@ -878,20 +954,37 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
     >
       {mode === 'play' && gameState !== 'playing' && (
         <div className="absolute inset-0 z-[110] bg-slate-900/80 backdrop-blur flex items-center justify-center p-4">
-          <div className="bg-slate-800 p-6 sm:p-8 rounded-2xl border-2 border-slate-700 text-center shadow-2xl max-w-sm w-full">
+          <div className="bg-slate-800 p-6 sm:p-8 rounded-2xl border-2 border-slate-700 text-center shadow-2xl max-w-sm w-full space-y-4">
             <h2 className="text-2xl font-bold mb-2">
-              {gameState === 'won' ? 'Level Cleared!' : 'Game Over'}
+              {gameState === 'won' ? '🎉 Level Cleared!' : '💔 Game Over'}
             </h2>
-            <p className="text-slate-400 mb-6 text-sm">
+            <p className="text-slate-400 text-sm">
               {gameState === 'won'
                 ? 'All tiles successfully matched!'
-                : 'Tray overflowed! No more valid moves.'}
+                : 'Tray overflowed, player HP depleted, or timer reached 0!'}
             </p>
+
+            {gameState === 'lost' && !hasRevivedThisRun && onRevive ? (
+              <div className="bg-slate-900/60 p-4 rounded-xl border border-rose-500/30 space-y-3">
+                <p className="text-xs text-rose-300 font-semibold leading-relaxed">
+                  ❤️ <strong>Revive Booster is Available!</strong><br />
+                  Return 5 tiles from your tray to the board and trigger an icon shuffle to keep your run alive. (Can only be used once per run)
+                </p>
+                <button
+                  onClick={onRevive}
+                  className="w-full bg-rose-500 hover:bg-rose-400 text-white font-bold py-2.5 rounded-xl transition-all shadow-lg hover:shadow-rose-500/20 active:scale-95 cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>Use Revive Booster</span>
+                </button>
+              </div>
+            ) : null}
+
             <button
               onClick={stopPlayMode}
-              className="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold py-3 rounded-xl transition-colors cursor-pointer"
+              className="w-full bg-slate-700 hover:bg-slate-600 text-slate-200 font-bold py-3 rounded-xl transition-colors cursor-pointer"
             >
-              Return to Editor
+              {gameState === 'lost' && !hasRevivedThisRun && onRevive ? 'Give Up' : 'Return to Editor'}
             </button>
           </div>
         </div>
@@ -955,6 +1048,132 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
           </div>
         )}
 
+        {/* Board Timer Countdown Bar */}
+        {isPlayMode && boardTimer?.enabled && (
+          <div className={`w-full max-w-md bg-slate-900 border rounded-2xl p-3 flex flex-col items-center gap-2 shadow-xl animate-in fade-in zoom-in duration-200 z-50 ${timeLeft < 15 ? 'border-rose-500 animate-pulse bg-rose-950/20' : 'border-amber-500/50'}`}>
+            <div className="flex items-center justify-between w-full text-xs font-bold text-amber-300">
+              <span className="flex items-center gap-1">⏳ Board Timer Countdown</span>
+              <div className="flex items-center gap-2">
+                <span className={`font-mono text-sm ${timeLeft < 15 ? 'text-rose-400 font-extrabold text-base animate-bounce' : 'text-amber-200'}`}>
+                  {timeLeft} seconds
+                </span>
+                {onAddTime && (
+                  <button
+                    onClick={onAddTime}
+                    title="AddTime: +15 seconds to level"
+                    className="px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/35 border border-amber-500/40 text-[10px] font-black text-amber-300 rounded-md transition-colors cursor-pointer flex items-center gap-1 shrink-0 shadow-sm"
+                  >
+                    <span>+15s</span>
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="w-full h-2.5 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
+              <div
+                className={`h-full transition-all duration-1000 rounded-full ${timeLeft < 15 ? 'bg-rose-500' : 'bg-gradient-to-r from-amber-500 to-yellow-300'}`}
+                style={{ width: `${(timeLeft / boardTimer.duration) * 100}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* BOSS Battle HP/Player HP Bars */}
+        {isPlayMode && bossBattle?.enabled && (
+          <div className="w-full max-w-md bg-slate-900/90 border border-red-500/60 rounded-2xl p-3.5 flex flex-col gap-2.5 shadow-2xl animate-in fade-in zoom-in duration-200 z-50">
+            {/* Boss HP Bar */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs font-black text-red-400">
+                <span className="flex items-center gap-1">👹 EVIL BOSS HP</span>
+                <span className="font-mono text-sm">{bossHP}%</span>
+              </div>
+              <div className="w-full h-3 bg-slate-950 rounded-full overflow-hidden border border-slate-800 relative">
+                <div
+                  className="h-full bg-gradient-to-r from-red-600 via-red-500 to-orange-400 transition-all duration-300 rounded-full animate-pulse"
+                  style={{ width: `${bossHP}%` }}
+                />
+                <div className="absolute inset-0 flex items-center justify-center text-[9px] font-black text-red-200/45 tracking-widest uppercase">
+                  {bossHP === 0 ? 'DEFEATED' : 'STRIKE MATCHES TO DAMAGE'}
+                </div>
+              </div>
+            </div>
+
+            {/* Player HP Bar */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs font-black text-emerald-400">
+                <span className="flex items-center gap-1">🛡️ KNIGHT PLAYER HP</span>
+                <span className="font-mono text-sm">{playerHP}%</span>
+              </div>
+              <div className="w-full h-3 bg-slate-950 rounded-full overflow-hidden border border-slate-800 relative">
+                <div
+                  className={`h-full transition-all duration-300 rounded-full ${playerHP <= 25 ? 'bg-rose-600 animate-pulse' : 'bg-gradient-to-r from-emerald-600 to-teal-400'}`}
+                  style={{ width: `${playerHP}%` }}
+                />
+                <div className="absolute inset-0 flex items-center justify-center text-[9px] font-black text-emerald-200/45 tracking-widest uppercase">
+                  {playerHP <= 25 ? 'CRITICAL HP - HEAL / REVIVE NEEDED' : 'FULL TRAY CAUSES -25% DAMAGE'}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Sweet Delivery Active Orders */}
+        {isPlayMode && sweetDelivery?.enabled && (() => {
+          const isRegistryActive = playTiles.some(t => t.assignedIconId != null);
+          const activeOrders = sweetDelivery.orders.filter(
+            orderIcon => !completedOrders.map(String).includes(String(orderIcon))
+          );
+
+          if (activeOrders.length === 0) return null;
+
+          return (
+            <div className="w-full max-w-md bg-slate-900 border border-cyan-500/50 rounded-2xl p-3.5 flex flex-col gap-3 shadow-2xl animate-in fade-in zoom-in duration-200 z-50">
+              <div className="border-b border-slate-800 pb-1.5 flex justify-center">
+                <span className="text-xs font-black text-cyan-300 flex items-center gap-1 uppercase tracking-wider">
+                  🍬 SWEET DELIVERY CHALLENGE (Max Trays: 5 Slots)
+                </span>
+              </div>
+              <div className="flex flex-wrap justify-center gap-3">
+                {activeOrders.map((orderIcon, idx) => {
+                  let IconComp: React.ComponentType<{ className?: string }> = Gift;
+                  let colorObj: any = null;
+
+                  if (isRegistryActive) {
+                    const matchedTile = playTiles.find(t => String(t.assignedIconId) === String(orderIcon));
+                    if (matchedTile) {
+                      IconComp = ICONS[matchedTile.baseIcon || ''] || Gift;
+                      colorObj = COLORS.find(c => c.id === matchedTile.color);
+                    }
+                  } else {
+                    IconComp = ICONS[orderIcon] || Gift;
+                  }
+
+                  const iconColorClass = colorObj ? colorObj.class : 'text-cyan-400';
+                  const containerBgClass = colorObj ? colorObj.bg : 'bg-cyan-500/10';
+                  const containerBorderClass = colorObj ? colorObj.border : 'border-cyan-500/30';
+
+                  return (
+                    <div
+                      key={idx}
+                      className={`flex flex-col items-center justify-center p-3.5 rounded-2xl border bg-slate-950/60 shadow-inner ${containerBorderClass} transition-all duration-300 hover:scale-105 hover:bg-slate-950/80`}
+                    >
+                      <div className={`flex items-center gap-1.5 p-2 rounded-xl border ${containerBgClass} ${containerBorderClass} shadow-md`}>
+                        <IconComp className={`w-5 h-5 ${iconColorClass}`} />
+                        <IconComp className={`w-5 h-5 ${iconColorClass}`} />
+                        <IconComp className={`w-5 h-5 ${iconColorClass}`} />
+                      </div>
+                      {isRegistryActive && (
+                        <span className="text-[10px] font-mono font-black text-slate-400 mt-2 tracking-wider">
+                          ID: #{orderIcon}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
+
         <div
           className="relative"
           style={{
@@ -971,10 +1190,8 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
             style={{
               width: '480px',
               height: '480px',
-              transform: isPlayMode && boardMorphism?.enabled
-                ? `scale(${effectiveScale}) rotate(${boardMorphism.spinAngle || 0}deg) scaleX(${boardMorphism.mirroredHorizons ? -1 : 1})`
-                : `scale(${effectiveScale})`,
-              transformOrigin: isPlayMode && boardMorphism?.enabled ? 'center center' : 'top left',
+              transform: `scale(${effectiveScale})`,
+              transformOrigin: 'top left',
               backgroundImage:
                 'linear-gradient(to right, #1e293b 1px, transparent 1px), linear-gradient(to bottom, #1e293b 1px, transparent 1px)',
               backgroundSize: '20px 20px',

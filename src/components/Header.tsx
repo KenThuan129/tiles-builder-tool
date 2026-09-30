@@ -28,6 +28,8 @@ interface HeaderProps {
   setIsRightPanelOpen: React.Dispatch<React.SetStateAction<boolean>>;
   container: Tile[];
   slotExpandUsed: number;
+  bossBattleEnabled?: boolean;
+  sweetDeliveryEnabled?: boolean;
   tiles: Tile[];
   giftsRevealed: number;
   eventItemsCollected: number;
@@ -62,6 +64,8 @@ export const Header: React.FC<HeaderProps> = ({
   setIsRightPanelOpen,
   container,
   slotExpandUsed,
+  bossBattleEnabled = false,
+  sweetDeliveryEnabled = false,
   tiles,
   giftsRevealed,
   eventItemsCollected,
@@ -125,7 +129,7 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="order-3 lg:order-none w-full lg:w-auto flex-1 flex justify-center my-1 lg:my-0 lg:mx-4">
           <div className="flex items-center gap-2 bg-slate-700 p-1.5 sm:p-2 rounded-xl border-b-2 sm:border-b-4 border-slate-900 shadow-inner max-w-full overflow-x-auto justify-start">
             <div className="flex gap-1 sm:gap-2 shrink-0">
-              {[...Array(7 + slotExpandUsed)].map((_, i) => (
+              {[...Array((sweetDeliveryEnabled ? 5 : 7) + slotExpandUsed)].map((_, i) => (
                 <div key={i} className="w-8 h-8 sm:w-10 sm:h-10 bg-slate-800 rounded shadow-inner border border-slate-900 relative shrink-0">
                   {container[i] && (
                     container[i].mechanic === 'eventItem' ? (

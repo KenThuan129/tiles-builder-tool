@@ -3,7 +3,8 @@ import {
   ViewportPresetKey, Tile, DifficultyMod, ThemeWeights,
   IconPoolEntry, ThemeIconRegistry, BoosterAvailability, SuggestParams,
   ValidatedImportData, ImportWarning, TileCluster, BotPersona, MoveLogItem, MoveSequencePayload,
-  BoardMorphismConfig, TileSpectrumEntry, EditorTool
+  BoardMorphismConfig, TileSpectrumEntry, EditorTool,
+  BoardTimerConfig, BoardRandomConfig, BossBattleConfig, SweetDeliveryConfig
 } from './types/game';
 import {
   VIEWPORT_PRESETS, INTRINSIC_BOARD_SIZE, WEIGHTS, ICONS, COLORS,
@@ -311,6 +312,35 @@ export default function App() {
     mirroredHorizons: false,
   });
   const [tileSpectrums, setTileSpectrums] = useState<TileSpectrumEntry[]>([]);
+
+  const [boardTimer, setBoardTimer] = useState<BoardTimerConfig>({
+    enabled: false,
+    duration: 60,
+  });
+
+  const [boardRandom, setBoardRandom] = useState<BoardRandomConfig>({
+    enabled: false,
+    interval: 10,
+  });
+
+  const [bossBattle, setBossBattle] = useState<BossBattleConfig>({
+    enabled: false,
+    maxHP: 100,
+  });
+
+  const [sweetDelivery, setSweetDelivery] = useState<SweetDeliveryConfig>({
+    enabled: false,
+    orders: [], // Will be generated when starting the play mode
+  });
+
+  // Dynamic Board Mechanism Play States
+  const [timeLeft, setTimeLeft] = useState<number>(60);
+  const [bossHP, setBossHP] = useState<number>(100);
+  const [playerHP, setPlayerHP] = useState<number>(100);
+  const [completedOrders, setCompletedOrders] = useState<string[]>([]);
+  const [hasRevivedThisRun, setHasRevivedThisRun] = useState<boolean>(false);
+  const [matchCountSinceLastShuffle, setMatchCountSinceLastShuffle] = useState<number>(0);
+  const [hasPickedFirstTile, setHasPickedFirstTile] = useState<boolean>(false);
 
   const [playTiles, setPlayTiles] = useState<Tile[]>([]);
   const [container, setContainer] = useState<Tile[]>([]);
@@ -688,6 +718,25 @@ export default function App() {
     setMoveLogs([]);
     setIsBotActive(false);
 
+    // Initialize mechanism run-time states
+    setTimeLeft(boardTimer.enabled ? boardTimer.duration : 60);
+    setBossHP(bossBattle.maxHP);
+    setPlayerHP(100);
+    setCompletedOrders([]);
+    setHasRevivedThisRun(false);
+    setMatchCountSinceLastShuffle(0);
+    setHasPickedFirstTile(false);
+
+    if (sweetDelivery.enabled) {
+      const activeIcons = Array.from(new Set(initializedPlayTiles.map(t => t.baseIcon).filter(Boolean))) as string[];
+      const shuffled = [...activeIcons].sort(() => Math.random() - 0.5);
+      const deliveryOrders = shuffled.slice(0, 4);
+      while (deliveryOrders.length < 4) {
+        deliveryOrders.push(Object.keys(ICONS)[Math.floor(Math.random() * Object.keys(ICONS).length)]);
+      }
+      setSweetDelivery(prev => ({ ...prev, orders: deliveryOrders }));
+    }
+
     setIsLeftSidebarOpen(false);
     setIsRightPanelOpen(false);
   };
@@ -785,7 +834,7 @@ export default function App() {
     };
   }, [levelNum, isBotActive, botPersona, moveLogs, gameState, tiles.length, difficultyMod]);
 
-  // AI Bot Auto-Play Loop
+  // AI Bot Auto-Play Loop with Booster Usage Tendencies
   useEffect(() => {
     if (!isBotActive || mode !== 'play' || gameState !== 'playing') return;
 
@@ -800,6 +849,39 @@ export default function App() {
           return prev + 1;
         });
       } else {
+        // Booster usage tendencies based on persona
+        const trayMax = bossBattle.enabled || sweetDelivery.enabled ? (5 + slotExpandUsed) : (7 + slotExpandUsed);
+        let usedBooster = false;
+
+        if (container.length >= trayMax - 1) {
+          let useBoosterProb = 0.2; // casual
+          if (botPersona === 'veteran') useBoosterProb = 0.7;
+          if (botPersona === 'hardcore') useBoosterProb = 0.95;
+
+          if (Math.random() < useBoosterProb) {
+            if (boosterInventory.slotExpand > 0) {
+              handleSlotExpand();
+              usedBooster = true;
+            } else if (boosterInventory.magnet > 0) {
+              const target = findMagnetTargets(playTiles, container);
+              if (target && target.tilesToPull.length > 0) {
+                handleMagnet();
+                usedBooster = true;
+              }
+            } else if (boosterInventory.swap > 0) {
+              handleSwap();
+              usedBooster = true;
+            } else if (boosterInventory.undo > 0) {
+              handleUndo();
+              usedBooster = true;
+            }
+          }
+        }
+
+        if (usedBooster) {
+          return; // Skip picking a tile for this tick since we used a booster
+        }
+
         const move = getBotNextMove(botPersona, playTiles, container);
         if (move.tileToPick) {
           handleTileClick(move.tileToPick, move.explanation);
@@ -810,7 +892,45 @@ export default function App() {
     }, intervalTime);
 
     return () => clearInterval(timer);
-  }, [isBotActive, mode, gameState, botSpeed, playTiles, container, botPersona, simulationPayload]);
+  }, [isBotActive, mode, gameState, botSpeed, playTiles, container, botPersona, simulationPayload, boosterInventory, slotExpandUsed, bossBattle, sweetDelivery]);
+
+  // Bot Revive Check
+  useEffect(() => {
+    if (!isBotActive || mode !== 'play' || gameState !== 'lost' || hasRevivedThisRun) return;
+
+    let reviveChance = 0.4; // casual
+    if (botPersona === 'veteran') reviveChance = 0.8;
+    if (botPersona === 'hardcore') reviveChance = 1.0;
+
+    const timer = setTimeout(() => {
+      if (Math.random() < reviveChance) {
+        handleRevive();
+      } else {
+        setIsBotActive(false);
+        console.log(`🤖 Bot (${botPersona}) decided to give up instead of reviving.`);
+      }
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [isBotActive, mode, gameState, botPersona, hasRevivedThisRun]);
+
+  // Board Timer Countdown
+  useEffect(() => {
+    if (mode !== 'play' || gameState !== 'playing' || !boardTimer.enabled || !hasPickedFirstTile) return;
+
+    const timer = setInterval(() => {
+      setTimeLeft(prev => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          setGameState('lost');
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [mode, gameState, boardTimer.enabled]);
 
   const handleUndo = () => {
     if (mode !== 'play' || gameState !== 'playing') return;
@@ -909,6 +1029,76 @@ export default function App() {
 
     setSlotExpandUsed(prev => prev + 1);
     setBoosterInventory(prev => ({ ...prev, slotExpand: prev.slotExpand - 1 }));
+  };
+
+  const handleRevive = () => {
+    if (mode !== 'play' || gameState !== 'lost' || hasRevivedThisRun) return;
+
+    // Take up to 5 tiles from the container to put back on board
+    let workingContainer = [...container];
+    const tilesToReturn = workingContainer.splice(-5, 5);
+
+    let placesFound = 0;
+    const returnedWithCoords = tilesToReturn.map(rTile => {
+      let placed = false;
+      // Find empty coordinates on lowest layer
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const rx = Math.floor(Math.random() * 10) * 2 + 2;
+        const ry = Math.floor(Math.random() * 10) * 2 + 2;
+        const overlapping = playTiles.some(t => t.z === 0 && isOverlapping(t, { x: rx, y: ry }));
+        if (!overlapping) {
+          rTile.x = rx;
+          rTile.y = ry;
+          rTile.z = 0;
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) {
+        rTile.x = 2 + (placesFound * 2);
+        rTile.y = 2;
+        rTile.z = 0;
+      }
+      placesFound++;
+      return rTile;
+    });
+
+    let workingBoard = [...playTiles, ...returnedWithCoords];
+
+    // Trigger board shuffle (shuffle coordinates of all non-gift tiles on board)
+    const matchableOnBoard = workingBoard.filter(t => !t.isGift);
+    const shuffledBoard = shuffleIcons(matchableOnBoard, countInitialMatches(matchableOnBoard));
+    if (shuffledBoard) {
+      workingBoard = [...shuffledBoard, ...workingBoard.filter(t => t.isGift)];
+    }
+
+    setPlayTiles(workingBoard);
+    setContainer(workingContainer);
+    setHasRevivedThisRun(true);
+    setGameState('playing');
+    
+    // Reset player HP back to 50% if in boss battle so they can keep playing
+    if (bossBattle.enabled) {
+      setPlayerHP(50);
+    }
+    // Also add +30 seconds to board timer if enabled to help them recover
+    if (boardTimer.enabled) {
+      setTimeLeft(prev => prev + 30);
+    }
+
+    // Add log
+    const moveItem: MoveLogItem = {
+      step: moveLogs.length + 1,
+      tileId: `revive-${Date.now()}`,
+      x: 0, y: 0, z: 0,
+      timestamp: new Date().toLocaleTimeString(),
+      personaUsed: isBotActive ? botPersona : 'human',
+      actionType: 'booster_swap',
+      explanation: `👼 REVIVE USED: Returned ${returnedWithCoords.length} tiles to the board, shuffled, and resumed game!`,
+      trayStateAfter: workingContainer.map(t => ({ icon: t.baseIcon, color: t.color })),
+      boardTilesRemaining: workingBoard.filter(t => !t.isGift).length,
+    };
+    setMoveLogs(prev => [...prev, moveItem]);
   };
 
   const redistributeThemes = () => {
@@ -1032,6 +1222,10 @@ export default function App() {
     if (gameState !== 'playing') return;
     if (!isTileFree(tile, playTiles)) return;
 
+    if (!hasPickedFirstTile) {
+      setHasPickedFirstTile(true);
+    }
+
     let workingBoard = [...playTiles];
     if (tile.mechanic === 'hidden' && !tile.isRevealed) {
       workingBoard = workingBoard.map(t => t.id === tile.id ? { ...t, isRevealed: true } : t);
@@ -1045,6 +1239,7 @@ export default function App() {
     workingBoard = workingBoard.filter(t => !groupTiles.some(g => g.id === t.id));
     let workingContainer = [...container];
     let anyMatchOccurred = false;
+    let matchedIcon: string | undefined = undefined;
     let matchedEventItemCount = 0;
     let matchedEventItemWithinWindow = 0;
 
@@ -1065,6 +1260,7 @@ export default function App() {
         ) {
           const matchedTriplet = workingContainer.splice(i, 3);
           anyMatchOccurred = true;
+          matchedIcon = matchedTriplet[0].baseIcon;
 
           matchedTriplet.forEach(mt => {
             if (mt.mechanic === 'eventItem') {
@@ -1088,7 +1284,11 @@ export default function App() {
       return t;
     });
 
+    let nextBossHP = bossHP;
+    let nextCompletedOrders = [...completedOrders];
+
     if (anyMatchOccurred) {
+      // Ice mechanics matching
       workingBoard = workingBoard.map(t => {
         if ((t.mechanic === 'ice2' || t.mechanic === 'ice3') && (t.iceMatchesRemaining || 0) > 0) {
           const isPhysicallyFree = !isTileCoveredByOther(t, workingBoard) && !isChainLocked(t);
@@ -1098,6 +1298,64 @@ export default function App() {
         }
         return t;
       });
+
+      // Board Random: Increment match counter & shuffle if interval reached
+      setMatchCountSinceLastShuffle(prev => {
+        const nextCount = prev + 1;
+        if (boardRandom.enabled && nextCount >= boardRandom.interval) {
+          // Shuffle layout and icons of matchable board tiles (preserving z layers)
+          const matchableByLayer: Record<number, Tile[]> = {};
+          workingBoard.forEach(t => {
+            if (!t.isGift) {
+              (matchableByLayer[t.z] ||= []).push(t);
+            }
+          });
+
+          Object.entries(matchableByLayer).forEach(([zStr, layerTiles]) => {
+            const coords = layerTiles.map(t => ({ x: t.x, y: t.y }));
+            const iconsColors = layerTiles.map(t => ({
+              baseIcon: t.baseIcon,
+              color: t.color,
+              assignedIconId: t.assignedIconId,
+              themeID: t.themeID,
+              tripletGroupId: t.tripletGroupId
+            }));
+
+            // Shuffle
+            coords.sort(() => Math.random() - 0.5);
+            iconsColors.sort(() => Math.random() - 0.5);
+
+            layerTiles.forEach((tile, idx) => {
+              const coord = coords[idx];
+              const ic = iconsColors[idx];
+              tile.x = coord.x;
+              tile.y = coord.y;
+              tile.baseIcon = ic.baseIcon;
+              tile.color = ic.color;
+              tile.assignedIconId = ic.assignedIconId;
+              tile.themeID = ic.themeID;
+              tile.tripletGroupId = ic.tripletGroupId;
+            });
+          });
+
+          return 0; // Reset counter
+        }
+        return nextCount;
+      });
+
+      // BOSS Battle: Deplete Boss HP by 25
+      if (bossBattle.enabled) {
+        nextBossHP = Math.max(0, bossHP - 25);
+        setBossHP(nextBossHP);
+      }
+
+      // Sweet Delivery: Track completed orders
+      if (sweetDelivery.enabled && matchedIcon && sweetDelivery.orders.includes(matchedIcon)) {
+        if (!nextCompletedOrders.includes(matchedIcon)) {
+          nextCompletedOrders = [...nextCompletedOrders, matchedIcon];
+          setCompletedOrders(nextCompletedOrders);
+        }
+      }
     }
 
     workingBoard = workingBoard.map(t => {
@@ -1140,11 +1398,71 @@ export default function App() {
       workingBoard = workingBoard.filter(t => !newlyRevealedIds.has(t.id));
     }
 
+    // Determine tray max capacity
+    const trayMax = bossBattle.enabled || sweetDelivery.enabled ? (5 + slotExpandUsed) : (7 + slotExpandUsed);
+    let bossFullTrayHandling = false;
+
+    if (workingContainer.length >= trayMax) {
+      if (bossBattle.enabled) {
+        // Full tray in Boss Battle: Return 3 tiles to grid, shuffle board, player loses 25% HP
+        bossFullTrayHandling = true;
+        const returned = workingContainer.splice(-3, 3);
+        
+        let placesFound = 0;
+        const returnedWithCoords = returned.map(rTile => {
+          let placed = false;
+          // Find empty coordinates on lowest layer
+          for (let attempt = 0; attempt < 50; attempt++) {
+            const rx = Math.floor(Math.random() * 10) * 2 + 2;
+            const ry = Math.floor(Math.random() * 10) * 2 + 2;
+            const overlapping = workingBoard.some(t => t.z === 0 && isOverlapping(t, { x: rx, y: ry }));
+            if (!overlapping) {
+              rTile.x = rx;
+              rTile.y = ry;
+              rTile.z = 0;
+              placed = true;
+              break;
+            }
+          }
+          if (!placed) {
+            rTile.x = 2 + (placesFound * 2);
+            rTile.y = 2;
+            rTile.z = 0;
+          }
+          placesFound++;
+          return rTile;
+        });
+
+        workingBoard = [...workingBoard, ...returnedWithCoords];
+
+        // Shuffle board icons
+        const matchableOnBoard = workingBoard.filter(t => !t.isGift);
+        const shuffledBoard = shuffleIcons(matchableOnBoard, countInitialMatches(matchableOnBoard));
+        if (shuffledBoard) {
+          workingBoard = [...shuffledBoard, ...workingBoard.filter(t => t.isGift)];
+        }
+
+        // Subtract player HP by 25
+        setPlayerHP(prev => {
+          const next = Math.max(0, prev - 25);
+          if (next <= 0) {
+            setGameState('lost');
+          }
+          return next;
+        });
+      } else {
+        setGameState('lost');
+      }
+    }
+
     setPlayTiles(workingBoard);
     setContainer(workingContainer);
 
     // Record move log
-    const moveExplanation = customExplanation || `${isBotActive ? botPersona : 'Human'} move: Picked ${tile.baseIcon || 'Tile'} (${tile.color || 'normal'}) at (x:${tile.x}, y:${tile.y}, z:${tile.z}).`;
+    let moveExplanation = customExplanation || `${isBotActive ? botPersona : 'Human'} move: Picked ${tile.baseIcon || 'Tile'} (${tile.color || 'normal'}) at (x:${tile.x}, y:${tile.y}, z:${tile.z}).`;
+    if (bossFullTrayHandling) {
+      moveExplanation += " ⚠️ Tray full! returned 3 tiles to board, shuffled, and lost 25% Player HP.";
+    }
     const moveItem: MoveLogItem = {
       step: moveLogs.length + 1,
       tileId: tile.id,
@@ -1168,14 +1486,31 @@ export default function App() {
     const totalGiftsInLevel = giftsInLevel.length;
     const allGiftsRevealed = totalGiftsInLevel > 0 && remainingGifts.length === 0;
 
-    const trayMax = 7 + slotExpandUsed;
-
-    if (workingContainer.length >= trayMax) {
-      setGameState('lost');
-    } else if (totalGiftsInLevel > 0) {
-      if (allGiftsRevealed) setGameState('won');
-    } else {
-      if (remainingTiles.length === 0) setGameState('won');
+    // Resolve Win/Lose State
+    if (gameState === 'playing') {
+      if (sweetDelivery.enabled) {
+        if (nextCompletedOrders.length >= sweetDelivery.orders.length) {
+          setGameState('won');
+        } else if (workingContainer.length >= trayMax && !bossBattle.enabled) {
+          setGameState('lost');
+        }
+      } else if (bossBattle.enabled) {
+        if (nextBossHP <= 0) {
+          setGameState('won');
+        } else if (playerHP <= 25 && bossFullTrayHandling) { // Player HP drops to 0
+          setGameState('lost');
+        } else if (workingContainer.length >= trayMax && !bossBattle.enabled) {
+          setGameState('lost');
+        }
+      } else {
+        if (workingContainer.length >= trayMax) {
+          setGameState('lost');
+        } else if (totalGiftsInLevel > 0) {
+          if (allGiftsRevealed) setGameState('won');
+        } else {
+          if (remainingTiles.length === 0) setGameState('won');
+        }
+      }
     }
   };
 
@@ -1696,8 +2031,21 @@ export default function App() {
       }
     }
 
-    const totalRaw = staticTotal + breakdown.maiPenalty;
-    const staticWithMod = totalRaw * modConfig.multiplier;
+    const boardSpecialMechs = {
+      timerScore: boardTimer.enabled ? 15.0 * (60 / boardTimer.duration) : 0,
+      randomScore: boardRandom.enabled ? -(15 - boardRandom.interval) : 0,
+      bossScore: bossBattle.enabled ? 25.0 : 0,
+      deliveryScore: sweetDelivery.enabled ? 20.0 : 0,
+      total: 0
+    };
+    boardSpecialMechs.total = boardSpecialMechs.timerScore + boardSpecialMechs.randomScore + boardSpecialMechs.bossScore + boardSpecialMechs.deliveryScore;
+
+    const totalRaw = staticTotal + breakdown.maiPenalty + boardSpecialMechs.total;
+    let timerModifier = 1.0;
+    if (boardTimer.enabled) {
+      timerModifier = Math.max(0.7, 60 / boardTimer.duration);
+    }
+    const staticWithMod = totalRaw * modConfig.multiplier * timerModifier;
 
     const baseRelief = calculateBoosterRelief(baseAvailability);
     const baseMultiplier = calculateBoosterMultiplier(baseRelief);
@@ -1780,6 +2128,7 @@ export default function App() {
       capInventory,
       comboTriplets,
       iconAggregated,
+      boardSpecialMechanics: boardSpecialMechs,
     };
   }, [tiles, playTiles, mode, levelNum, difficultyMod, difficultyMods,
     distributionPattern, hybridSub1, hybridSub2, iconColorRatio,
@@ -2335,6 +2684,8 @@ export default function App() {
         setIsRightPanelOpen={setIsRightPanelOpen}
         container={container}
         slotExpandUsed={slotExpandUsed}
+        sweetDeliveryEnabled={sweetDelivery.enabled}
+        bossBattleEnabled={bossBattle.enabled}
         tiles={tiles}
         giftsRevealed={giftsRevealed}
         eventItemsCollected={eventItemsCollected}
@@ -2407,6 +2758,14 @@ export default function App() {
             setBoardMorphism={setBoardMorphism}
             tileSpectrums={tileSpectrums}
             setTileSpectrums={setTileSpectrums}
+            boardTimer={boardTimer}
+            setBoardTimer={setBoardTimer}
+            boardRandom={boardRandom}
+            setBoardRandom={setBoardRandom}
+            bossBattle={bossBattle}
+            setBossBattle={setBossBattle}
+            sweetDelivery={sweetDelivery}
+            setSweetDelivery={setSweetDelivery}
             boosterPreset={boosterPreset}
             setBoosterPreset={setBoosterPreset}
             boosterCustom={boosterCustom}
@@ -2475,6 +2834,15 @@ export default function App() {
             selectedCombineShapeId={selectedCombineShapeId}
             boardMorphism={boardMorphism}
             tileSpectrums={tileSpectrums}
+            boardTimer={boardTimer}
+            timeLeft={timeLeft}
+            bossBattle={bossBattle}
+            bossHP={bossHP}
+            playerHP={playerHP}
+            sweetDelivery={sweetDelivery}
+            completedOrders={completedOrders}
+            hasRevivedThisRun={hasRevivedThisRun}
+            onRevive={handleRevive}
           />
 
           <AnalyticsPanel

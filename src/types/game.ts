@@ -192,6 +192,13 @@ export interface DifficultyStats {
   capInventory: BoosterAvailability;
   comboTriplets: Record<string, { themeId: string; iconId: number; tiles: number; triplets: number; remainder: number }>;
   iconAggregated: Record<string, { iconId: number; tiles: number; triplets: number; remainder: number; themes: string[] }>;
+  boardSpecialMechanics?: {
+    timerScore: number;
+    randomScore: number;
+    bossScore: number;
+    deliveryScore: number;
+    total: number;
+  };
 }
 
 export interface ImportWarning {
@@ -212,6 +219,26 @@ export interface BoardMorphismConfig {
   enabled: boolean;
   spinAngle: number;
   mirroredHorizons: boolean;
+}
+
+export interface BoardTimerConfig {
+  enabled: boolean;
+  duration: number; // in seconds
+}
+
+export interface BoardRandomConfig {
+  enabled: boolean;
+  interval: 5 | 10 | 15;
+}
+
+export interface BossBattleConfig {
+  enabled: boolean;
+  maxHP: number;
+}
+
+export interface SweetDeliveryConfig {
+  enabled: boolean;
+  orders: string[]; // List of 4 icon names that represent active orders
 }
 
 export type TileSpectrumBenefit = 'bonus_score' | 'wildcard_match' | 'clear_surrounding' | 'double_booster';
