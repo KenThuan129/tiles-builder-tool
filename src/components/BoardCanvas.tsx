@@ -1,19 +1,24 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import {
   Gift, Lock, Boxes, Layers, Check, MousePointer, Move, Trash2, Copy,
-  ArrowUp, ArrowDown, ArrowLeft, ArrowRight, X, Sparkles, ChevronUp, ChevronDown, Wand2
+  ArrowUp, ArrowDown, ArrowLeft, ArrowRight, X, Sparkles, ChevronUp, ChevronDown, Wand2,
+  Gem, Award, Package, Heart, Zap, RotateCw, RotateCcw, RefreshCw, Eye
 } from 'lucide-react';
 import {
   Tile, BoosterAvailability, TileCluster, BoardMorphismConfig, TileSpectrumEntry, EditorTool,
-  BoardTimerConfig, BossBattleConfig, SweetDeliveryConfig
+  BoardTimerConfig, BossBattleConfig, SweetDeliveryConfig, DeliveryOrderItem
 } from '../types/game';
 import {
-  INTRINSIC_BOARD_SIZE, STACK_OFFSET_PX, GIFT_SIZES,
-  ICONS, COLORS, THEME_DOT_COLORS, COMBINE_SHAPES
+  INTRINSIC_BOARD_SIZE, STACK_OFFSET_PX, GIFT_SIZES, GIFT_THEMES, DEFAULT_GIFT_THEME,
+  ICONS, COLORS, THEME_DOT_COLORS, COMBINE_SHAPES, CONVERTIBLE_MECHANICS, applyMechanicToTile
 } from '../constants/gameConfig';
 import {
-  isTileFree, isGiftBlocked, isChainLocked
+  isTileFree, isGiftBlocked, isChainLocked, calculateHiddenSafety
 } from '../utils/gameHelpers';
+import {
+  MorphismScope, MorphismTransformType, MorphismSymmetryType,
+  transformTileList, generateSymmetricTiles, bakeMorphismToTiles
+} from '../utils/morphismHelpers';
 
 interface BoardCanvasProps {
   mode: 'edit' | 'play';
@@ -28,7 +33,10 @@ interface BoardCanvasProps {
   activeGiftLayer: number;
   setActiveGiftLayer?: (layer: number) => void;
   giftPlacementMode: string | null;
+  activeGiftType?: string;
   selectedTool: EditorTool;
+  selectedTileIds?: Set<string>;
+  setSelectedTileIds?: React.Dispatch<React.SetStateAction<Set<string>>>;
   activeThemes: string[];
   container: Tile[];
   boosterInventory: BoosterAvailability;
@@ -44,6 +52,7 @@ interface BoardCanvasProps {
   selectedMechanic?: string;
   selectedCombineShapeId?: string;
   boardMorphism?: BoardMorphismConfig;
+  setBoardMorphism?: React.Dispatch<React.SetStateAction<BoardMorphismConfig>>;
   tileSpectrums?: TileSpectrumEntry[];
   boardTimer?: BoardTimerConfig;
   timeLeft?: number;
@@ -51,7 +60,11 @@ interface BoardCanvasProps {
   bossHP?: number;
   playerHP?: number;
   sweetDelivery?: SweetDeliveryConfig;
+  deliveryOrderItems?: DeliveryOrderItem[];
   completedOrders?: string[];
+  bossScrambleMovesCount?: number;
+  onBossScramble?: () => void;
+  notificationMsg?: string | null;
   hasRevivedThisRun?: boolean;
   onRevive?: () => void;
   onAddTime?: () => void;
@@ -79,7 +92,10 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
   activeGiftLayer,
   setActiveGiftLayer,
   giftPlacementMode,
+  activeGiftType = 'golden',
   selectedTool,
+  selectedTileIds: externalSelectedTileIds,
+  setSelectedTileIds: externalSetSelectedTileIds,
   activeThemes,
   container,
   boosterInventory,
@@ -94,6 +110,7 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
   selectedMechanic,
   selectedCombineShapeId,
   boardMorphism,
+  setBoardMorphism,
   tileSpectrums = [],
   boardTimer,
   timeLeft = 60,
@@ -101,7 +118,11 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
   bossHP = 100,
   playerHP = 100,
   sweetDelivery,
+  deliveryOrderItems = [],
   completedOrders = [],
+  bossScrambleMovesCount = 0,
+  onBossScramble,
+  notificationMsg: externalNotificationMsg,
   hasRevivedThisRun = false,
   onRevive,
   onAddTime,
@@ -118,18 +139,60 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const boardRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState<number>(600);
+  const [containerHeight, setContainerHeight] = useState<number>(600);
 
   // Marquee Selection & Bulk Operations State
-  const [selectedTileIds, setSelectedTileIds] = useState<Set<string>>(new Set());
+  const [internalSelectedTileIds, setInternalSelectedTileIds] = useState<Set<string>>(new Set());
+  const selectedTileIds = externalSelectedTileIds ?? internalSelectedTileIds;
+  const setSelectedTileIds = externalSetSelectedTileIds ?? setInternalSelectedTileIds;
+  const [isMechanicMenuOpen, setIsMechanicMenuOpen] = useState<boolean>(false);
+  const [sourceMechFilter, setSourceMechFilter] = useState<string>('all');
   const [isMarqueeActive, setIsMarqueeActive] = useState<boolean>(false);
   const [marqueeStart, setMarqueeStart] = useState<{ x: number; y: number } | null>(null);
   const [marqueeCurrent, setMarqueeCurrent] = useState<{ x: number; y: number } | null>(null);
   const [isDraggingMove, setIsDraggingMove] = useState<boolean>(false);
   const [dragMoveOrigin, setDragMoveOrigin] = useState<{ gx: number; gy: number } | null>(null);
   const [dragMoveDelta, setDragMoveDelta] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
-  const [notificationMsg, setNotificationMsg] = useState<string | null>(null);
+  const [internalNotificationMsg, setInternalNotificationMsg] = useState<string | null>(null);
+  const notificationMsg = externalNotificationMsg || internalNotificationMsg;
+  const setNotificationMsg = setInternalNotificationMsg;
+
+  // Board Morphism Level Design Toolbar State
+  const [canvasMorphismScope, setCanvasMorphismScope] = useState<MorphismScope>('all');
 
   const targetLayer = giftPlacementMode ? activeGiftLayer : activeLayer;
+
+  const showNotification = useCallback((msg: string) => {
+    setNotificationMsg(msg);
+    setTimeout(() => {
+      setNotificationMsg(null);
+    }, 2500);
+  }, []);
+
+  const handleCanvasTransform = (type: MorphismTransformType, overrideScope?: MorphismScope) => {
+    const scopeToUse = overrideScope || canvasMorphismScope;
+    setTiles(prev => {
+      const next = transformTileList(prev, type, scopeToUse, targetLayer, selectedTileIds);
+      return next;
+    });
+    const label = type === 'rotate90cw' ? 'Rotated 90° CW' :
+      type === 'rotate90ccw' ? 'Rotated 90° CCW' :
+      type === 'rotate180' ? 'Rotated 180°' :
+      type === 'flipH' ? 'Flipped Horizontal' : 'Flipped Vertical';
+    showNotification(`🌀 ${label} (${scopeToUse === 'all' ? 'All Tiles' : scopeToUse === 'layer' ? `Layer ${targetLayer}` : `${selectedTileIds.size} Selected`})`);
+  };
+
+  const handleCanvasSymmetry = (type: MorphismSymmetryType, overrideScope?: MorphismScope) => {
+    const scopeToUse = overrideScope || canvasMorphismScope;
+    setTiles(prev => {
+      const { newTiles, addedCount } = generateSymmetricTiles(prev, type, scopeToUse, targetLayer, selectedTileIds);
+      const symLabel = type === 'radial4' ? '4-Way Radial Symmetry' :
+        type === 'rotational2' ? '2-Way Rotational Symmetry' :
+        type === 'mirrorH' ? 'Horizontal Mirror' : 'Vertical Mirror';
+      showNotification(`🌸 Generated ${symLabel} (+${addedCount} cloned tiles)!`);
+      return newTiles;
+    });
+  };
 
   const getMorphismCoords = (tileX: number, tileY: number, wPx: number, hPx: number) => {
     let x = tileX * 20;
@@ -137,7 +200,8 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
     let w = wPx;
     let h = hPx;
 
-    if (isPlayMode && boardMorphism?.enabled) {
+    const shouldApplyMorphism = boardMorphism?.enabled && (isPlayMode || boardMorphism?.previewInEditor);
+    if (shouldApplyMorphism) {
       const cx = 240;
       const cy = 240;
       const tileCx = x + w / 2;
@@ -177,24 +241,32 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
   };
 
   useEffect(() => {
-    const updateWidth = () => {
+    const updateDimensions = () => {
       if (containerRef.current) {
-        setContainerWidth(containerRef.current.clientWidth - 32); // 32px padding
+        setContainerWidth(containerRef.current.clientWidth - 24);
+        setContainerHeight(containerRef.current.clientHeight - (isPlayMode ? 140 : 48));
       }
     };
-    updateWidth();
-    window.addEventListener('resize', updateWidth);
-    return () => window.removeEventListener('resize', updateWidth);
-  }, []);
+    updateDimensions();
+    window.addEventListener('resize', updateDimensions);
+    return () => window.removeEventListener('resize', updateDimensions);
+  }, [isPlayMode]);
 
-  // Compute effective scale to fit small screens smoothly
+  // Compute effective scale to fit both viewport width and height smoothly
   const effectiveScale = useMemo(() => {
+    let scale = boardScale;
     const targetPx = INTRINSIC_BOARD_SIZE * boardScale;
     if (containerWidth > 0 && targetPx > containerWidth) {
-      return containerWidth / INTRINSIC_BOARD_SIZE;
+      scale = Math.min(scale, containerWidth / INTRINSIC_BOARD_SIZE);
     }
-    return boardScale;
-  }, [boardScale, containerWidth]);
+    if (containerHeight > 0 && isPlayMode) {
+      const targetHeightPx = INTRINSIC_BOARD_SIZE * scale;
+      if (targetHeightPx > containerHeight) {
+        scale = Math.min(scale, Math.max(0.48, containerHeight / INTRINSIC_BOARD_SIZE));
+      }
+    }
+    return Math.max(0.45, scale);
+  }, [boardScale, containerWidth, containerHeight, isPlayMode]);
 
   // Clean up selection when switching to play mode or if selected tiles are deleted
   useEffect(() => {
@@ -208,13 +280,6 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
       });
     }
   }, [isPlayMode, tiles]);
-
-  const showNotification = (msg: string) => {
-    setNotificationMsg(msg);
-    setTimeout(() => {
-      setNotificationMsg(null);
-    }, 2500);
-  };
 
   // Bulk Move
   const handleMoveSelected = useCallback((dx: number, dy: number) => {
@@ -346,6 +411,61 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
     setSelectedTileIds(newIds);
     showNotification(`Duplicated ${duplicated.length} tiles.`);
   }, [selectedTileIds, tiles, setTiles]);
+
+  // Non-gift tiles in selection
+  const nonGiftSelectedTiles = useMemo(() => {
+    return tiles.filter(t => selectedTileIds.has(t.id) && !t.isGift);
+  }, [tiles, selectedTileIds]);
+
+  // Breakdown of mechanics in non-gift selected tiles
+  const selectedMechanicsCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    nonGiftSelectedTiles.forEach(t => {
+      const m = t.mechanic || 'normal';
+      counts[m] = (counts[m] || 0) + 1;
+    });
+    return counts;
+  }, [nonGiftSelectedTiles]);
+
+  const uniqueSelectedMechanics = useMemo(() => {
+    return Object.keys(selectedMechanicsCounts);
+  }, [selectedMechanicsCounts]);
+
+  // Transform selected matching tiles into another mechanic (strictly excluding Gift)
+  const handleConvertSelectedTiles = useCallback((targetMechId: string, sourceFilter: string = 'all') => {
+    if (nonGiftSelectedTiles.length === 0) return;
+    let convertedCount = 0;
+    setTiles(prev =>
+      prev.map(t => {
+        if (t.isGift) return t; // strictly preserve gifts
+        if (!selectedTileIds.has(t.id)) return t;
+        const currentMech = t.mechanic || 'normal';
+        if (sourceFilter !== 'all' && currentMech !== sourceFilter) return t;
+        convertedCount++;
+        return applyMechanicToTile(t, targetMechId);
+      })
+    );
+    const targetOption = CONVERTIBLE_MECHANICS.find(m => m.id === targetMechId);
+    showNotification(`Transformed ${convertedCount} selected tile${convertedCount > 1 ? 's' : ''} to ${targetOption?.label || targetMechId}.`);
+    setIsMechanicMenuOpen(false);
+  }, [nonGiftSelectedTiles, selectedTileIds, setTiles, showNotification]);
+
+  // Transform all tiles with source mechanic across entire level into target mechanic
+  const handleConvertAllInLevel = useCallback((sourceMech: string, targetMechId: string) => {
+    let convertedCount = 0;
+    setTiles(prev =>
+      prev.map(t => {
+        if (t.isGift) return t; // strictly preserve gifts
+        const currentMech = t.mechanic || 'normal';
+        if (currentMech !== sourceMech) return t;
+        convertedCount++;
+        return applyMechanicToTile(t, targetMechId);
+      })
+    );
+    const targetOption = CONVERTIBLE_MECHANICS.find(m => m.id === targetMechId);
+    showNotification(`Converted all ${convertedCount} '${sourceMech}' tiles in level to ${targetOption?.label || targetMechId}.`);
+    setIsMechanicMenuOpen(false);
+  }, [setTiles, showNotification]);
 
   // Bulk Apply Current Mechanic
   const handleApplyMechanicToSelected = useCallback((mech: string) => {
@@ -599,11 +719,15 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
     let bgColor = isEdit ? 'bg-slate-600' : '';
     let borderColor = isEdit ? 'border-slate-800' : '';
 
-    const widthPx = tile.isGift
-      ? ((((GIFT_SIZES[tile.mechanic || 'gift2x2']?.cols || tile.giftCols || 2) - 1) * 20) + 40 - 4)
+    const giftSize = tile.isGift
+      ? (GIFT_SIZES[tile.mechanic || ''] || (tile.giftCols && tile.giftRows ? { cols: tile.giftCols, rows: tile.giftRows, name: `Gift ${tile.giftCols}×${tile.giftRows}` } : GIFT_SIZES.gift2x2))
+      : null;
+
+    const widthPx = giftSize
+      ? ((((giftSize.cols - 1) * 20) + 40 - 4))
       : 40;
-    const heightPx = tile.isGift
-      ? ((((GIFT_SIZES[tile.mechanic || 'gift2x2']?.rows || tile.giftRows || 2) - 1) * 20) + 40 - 4)
+    const heightPx = giftSize
+      ? ((((giftSize.rows - 1) * 20) + 40 - 4))
       : 40;
 
     const dragGx = isSelected && isDraggingMove ? dragMoveDelta.dx : 0;
@@ -611,9 +735,35 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
     const pos = getMorphismCoords(tile.x + dragGx, tile.y + dragGy, widthPx, heightPx);
 
     if (tile.isGift) {
-      const size = GIFT_SIZES[tile.mechanic || 'gift2x2'] || { cols: tile.giftCols || 2, rows: tile.giftRows || 2 };
+      const size = giftSize || { cols: tile.giftCols || 2, rows: tile.giftRows || 2, name: `Gift ${tile.giftCols || 2}×${tile.giftRows || 2}` };
+      const giftTypeKey = tile.giftType || (tile.giftVisual !== undefined ? Object.keys(GIFT_THEMES).find(k => GIFT_THEMES[k].visualId === tile.giftVisual) : 'golden') || 'golden';
+      const theme = GIFT_THEMES[giftTypeKey] || GIFT_THEMES.golden;
       const activeBoard = isPlayMode ? playTiles : tiles;
       const isCovered = isGiftBlocked(tile, activeBoard);
+
+      const renderThemeIcon = (className = "w-6 h-6") => {
+        switch (theme.id) {
+          case 'mystery':
+            return <Sparkles className={className} />;
+          case 'crystal':
+            return <Gem className={className} />;
+          case 'ruby':
+            return <Heart className={className} />;
+          case 'emerald':
+            return <Award className={className} />;
+          case 'chest':
+            return <Package className={className} />;
+          case 'tech':
+            return <Zap className={className} />;
+          case 'golden':
+          default:
+            return <Gift className={className} />;
+        }
+      };
+
+      const isMini = size.cols <= 1 && size.rows <= 1;
+      const isNarrowH = size.rows === 1;
+      const isNarrowV = size.cols === 1;
 
       if (!isPlayMode) {
         const isHiddenByLayerView = (() => {
@@ -639,7 +789,16 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
             onClick={(e) => {
               e.stopPropagation();
               if (selectedTool === 'erase') {
-                setTiles(tiles.filter(t => t.id !== tile.id));
+                setTiles(prev => prev.filter(t => t.id !== tile.id));
+                showNotification(`Removed Gift Box (${size.cols}×${size.rows})`);
+              } else if (selectedTool === 'gift') {
+                // In gift tool: clicking a gift cycles theme
+                const themesList = Object.keys(GIFT_THEMES);
+                const currentIdx = themesList.indexOf(tile.giftType || 'golden');
+                const nextType = themesList[(currentIdx + 1) % themesList.length];
+                const themeConfig = GIFT_THEMES[nextType] || GIFT_THEMES.golden;
+                setTiles(prev => prev.map(t => t.id === tile.id ? { ...t, giftType: nextType, giftVisual: themeConfig.visualId } : t));
+                showNotification(`Changed Gift theme to ${themeConfig.label}. (Hover ✕ to delete)`);
               } else if (selectedTool === 'select') {
                 setSelectedTileIds(prev => {
                   const next = new Set(e.shiftKey ? prev : []);
@@ -649,10 +808,10 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
                 });
               }
             }}
-            className={`absolute rounded-lg shadow-lg flex items-center justify-center transition-all cursor-pointer
+            className={`absolute rounded-xl shadow-lg flex items-center justify-center transition-all cursor-pointer overflow-hidden
               ${isCovered
-                ? 'bg-amber-950/70 border-2 border-amber-900 border-dashed'
-                : 'bg-gradient-to-br from-amber-400 to-orange-500 border-2 border-yellow-300'}
+                ? `${theme.playCoveredBg} border-2 border-dashed`
+                : `${theme.editBg} border-2 shadow-md`}
               ${giftPlacementMode && tile.z !== activeGiftLayer ? 'opacity-50' : ''}
               ${!giftPlacementMode && tile.z !== activeLayer - 0.5 && tile.z !== activeLayer ? 'opacity-60' : ''}
               ${isSelected ? 'ring-4 ring-cyan-400 ring-offset-2 ring-offset-slate-950 shadow-[0_0_20px_rgba(34,211,238,0.8)] z-50 scale-102' : ''}
@@ -669,13 +828,55 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
                 : undefined
             }}
           >
-            <Gift className={`w-6 h-6 ${isCovered ? 'text-amber-700/60' : 'text-white'}`} />
-            <span className={`absolute bottom-0.5 right-0.5 text-[9px] font-bold ${isCovered ? 'text-amber-500/60' : 'text-white/90'}`}>
+            {/* Horizontal Ribbon Cross */}
+            {!isCovered && !isMini && (
+              <div
+                className={`absolute left-0 right-0 top-1/2 -translate-y-1/2 ${isNarrowH ? 'h-1.5' : 'h-2.5 sm:h-3'} ${theme.ribbonColor} shadow-inner pointer-events-none opacity-90`}
+              />
+            )}
+            {/* Vertical Ribbon Cross */}
+            {!isCovered && !isMini && (
+              <div
+                className={`absolute top-0 bottom-0 left-1/2 -translate-x-1/2 ${isNarrowV ? 'w-1.5' : 'w-2.5 sm:w-3'} ${theme.ribbonColor} shadow-inner pointer-events-none opacity-90`}
+              />
+            )}
+
+            {/* Centerpiece Theme Medallion */}
+            <div className={`relative z-10 p-1 rounded-full ${isCovered ? 'bg-slate-950/60' : 'bg-slate-950/40 backdrop-blur-xs border border-white/30'} flex items-center justify-center shadow`}>
+              {renderThemeIcon(`${isMini ? 'w-3.5 h-3.5' : size.cols >= 3 && size.rows >= 3 ? 'w-8 h-8' : 'w-5 h-5'} ${isCovered ? 'text-slate-500' : 'text-white drop-shadow'}`)}
+            </div>
+
+            {/* Theme Badge for Medium/Large Gifts */}
+            {size.cols >= 2 && size.rows >= 2 && !isCovered && (
+              <span className="absolute top-1 right-1 text-[7px] font-black uppercase tracking-wider px-1 py-0.2 rounded bg-black/40 text-white/90 border border-white/20">
+                {theme.label.split(' ')[0]}
+              </span>
+            )}
+
+            {/* Dimension Badge */}
+            <span className={`absolute bottom-0.5 right-1 text-[9px] font-black font-mono ${isCovered ? 'text-slate-500' : 'text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]'}`}>
               {size.cols}×{size.rows}
             </span>
-            <span className="absolute top-0.5 left-0.5 text-[8px] font-bold text-white/70">
+
+            {/* Layer Badge */}
+            <span className="absolute top-0.5 left-1 text-[8px] font-black text-white/90 drop-shadow">
               L{tile.z}
             </span>
+
+            {/* Quick Delete Badge on Gift (when in gift or erase tool) */}
+            {mode === 'edit' && (selectedTool === 'gift' || selectedTool === 'erase') && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setTiles(prev => prev.filter(t => t.id !== tile.id));
+                  showNotification(`Removed Gift Box (${size.cols}×${size.rows})`);
+                }}
+                title="Remove this Gift Box"
+                className="absolute top-1 right-1 z-40 p-1 bg-red-600/90 hover:bg-red-500 text-white rounded-md shadow-md transition-transform hover:scale-110 cursor-pointer"
+              >
+                <Trash2 className="w-3 h-3 stroke-[2.5]" />
+              </button>
+            )}
 
             {isSelected && (
               <div className="absolute -top-2 -left-2 bg-cyan-400 text-slate-950 rounded-full p-0.5 shadow-lg border border-slate-900 font-black z-30 animate-bounce">
@@ -685,7 +886,7 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
 
             {isCovered && (
               <div className="absolute -top-2 -right-2 bg-slate-900 rounded-full p-1 border border-amber-800 shadow">
-                <Lock className="w-3 h-3 text-amber-600" />
+                <Lock className="w-3 h-3 text-amber-500" />
               </div>
             )}
           </div>
@@ -696,23 +897,31 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
         return (
           <div
             key={tile.id}
-            className="absolute rounded-lg pointer-events-none
-              border-2 border-dashed border-amber-950/50 
-              bg-slate-950/80 backdrop-blur-[2px]"
+            className={`absolute rounded-xl pointer-events-none border-2 border-dashed ${theme.playCoveredBg} backdrop-blur-[2px] overflow-hidden`}
             style={{
               left: `${pos.x + 2}px`,
               top: `${pos.y + 2}px`,
               width: `${pos.w}px`,
               height: `${pos.h}px`,
               zIndex: baseZIndex,
-              filter: 'brightness(0.3) saturate(0.5)'
+              filter: 'brightness(0.35) saturate(0.6)'
             }}
           >
+            {/* Subtle Covered Cross Silhouette */}
+            {!isMini && (
+              <>
+                <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 h-2 bg-white/5 pointer-events-none" />
+                <div className="absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-2 bg-white/5 pointer-events-none" />
+              </>
+            )}
             <div className="w-full h-full relative flex items-center justify-center">
-              <Gift className="w-6 h-6 text-slate-800 mx-auto mt-1" />
-              <span className="absolute bottom-0.5 right-0.5 text-[9px] font-bold text-slate-700">
+              {renderThemeIcon(`${isMini ? 'w-3.5 h-3.5' : 'w-6 h-6'} text-slate-700 mx-auto mt-0.5`)}
+              <span className="absolute bottom-0.5 right-1 text-[9px] font-bold text-slate-600 font-mono">
                 {size.cols}×{size.rows}
               </span>
+              <div className="absolute top-0.5 left-1">
+                <Lock className="w-2.5 h-2.5 text-slate-600" />
+              </div>
             </div>
           </div>
         );
@@ -721,26 +930,47 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
       return (
         <div
           key={tile.id}
-          className="absolute rounded-lg shadow-2xl flex items-center justify-center pointer-events-none
-            bg-gradient-to-br from-yellow-300 via-amber-400 to-orange-500 
-            border-2 border-yellow-200
-            animate-pulse"
+          className={`absolute rounded-xl shadow-2xl flex items-center justify-center pointer-events-none overflow-hidden
+            ${theme.playRevealedBg} 
+            border-2 animate-pulse`}
           style={{
             left: `${pos.x + 2}px`,
             top: `${pos.y + 2}px`,
             width: `${pos.w}px`,
             height: `${pos.h}px`,
             zIndex: baseZIndex,
-            boxShadow: '0 0 30px rgba(251, 191, 36, 0.95), 0 0 60px rgba(251, 191, 36, 0.5), 0 0 90px rgba(251, 191, 36, 0.3)'
+            boxShadow: `0 0 35px ${theme.glowColor}, 0 0 70px ${theme.glowColor.replace('0.9', '0.45')}`
           }}
         >
-          <div className="w-full h-full relative flex items-center justify-center animate-pulse">
-            <div className="absolute -top-2 -left-2 text-yellow-200 text-lg animate-ping">✦</div>
-            <div className="absolute -top-2 -right-2 text-yellow-200 text-lg animate-ping" style={{ animationDelay: '150ms' }}>✦</div>
-            <div className="absolute -bottom-2 -left-2 text-yellow-200 text-lg animate-ping" style={{ animationDelay: '300ms' }}>✦</div>
-            <div className="absolute -bottom-2 -right-2 text-yellow-200 text-lg animate-ping" style={{ animationDelay: '450ms' }}>✦</div>
-            <Gift className="w-8 h-8 text-white drop-shadow-lg relative z-10" strokeWidth={2.5} />
-            <span className="absolute bottom-1 right-1 text-[10px] font-black text-white drop-shadow z-10">
+          {/* Radiant Ribbon Cross */}
+          {!isMini && (
+            <>
+              <div className={`absolute left-0 right-0 top-1/2 -translate-y-1/2 ${isNarrowH ? 'h-2' : 'h-3 sm:h-4'} ${theme.ribbonColor} shadow-md pointer-events-none z-0`} />
+              <div className={`absolute top-0 bottom-0 left-1/2 -translate-x-1/2 ${isNarrowV ? 'w-2' : 'w-3 sm:w-4'} ${theme.ribbonColor} shadow-md pointer-events-none z-0`} />
+            </>
+          )}
+
+          <div className="w-full h-full relative flex items-center justify-center animate-pulse z-10">
+            {/* Prismatic corner starbursts */}
+            <div className={`absolute -top-1 -left-1 text-sm animate-ping ${theme.sparkleColor}`}>✦</div>
+            <div className={`absolute -top-1 -right-1 text-sm animate-ping ${theme.sparkleColor}`} style={{ animationDelay: '150ms' }}>✦</div>
+            <div className={`absolute -bottom-1 -left-1 text-sm animate-ping ${theme.sparkleColor}`} style={{ animationDelay: '300ms' }}>✦</div>
+            <div className={`absolute -bottom-1 -right-1 text-sm animate-ping ${theme.sparkleColor}`} style={{ animationDelay: '450ms' }}>✦</div>
+
+            {/* Medallion */}
+            <div className="p-1 rounded-full bg-slate-950/40 backdrop-blur-xs border border-white/40 shadow-xl flex items-center justify-center">
+              {renderThemeIcon(`${isMini ? 'w-4 h-4' : size.cols >= 3 && size.rows >= 3 ? 'w-10 h-10' : 'w-7 h-7'} text-white drop-shadow-lg`)}
+            </div>
+
+            {/* Theme Tag */}
+            {size.cols >= 2 && size.rows >= 2 && (
+              <span className="absolute top-1 left-1.5 text-[8px] font-black uppercase tracking-wider px-1 py-0.2 rounded bg-black/50 text-white border border-white/30 drop-shadow">
+                {theme.label.split(' ')[0]}
+              </span>
+            )}
+
+            {/* Dimensions */}
+            <span className="absolute bottom-1 right-1.5 text-[10px] font-black text-white drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] font-mono z-10">
               {size.cols}×{size.rows}
             </span>
           </div>
@@ -750,7 +980,18 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
 
     if (isPlayMode) {
       if (tile.mechanic === 'hidden' && !tile.isRevealed) {
-        content = <span className="text-xl font-bold text-slate-400">?</span>;
+        content = (
+          <div className="flex flex-col items-center justify-center">
+            <span className="text-xl font-black text-slate-300 drop-shadow">?</span>
+            <span className={`text-[7px] font-black uppercase tracking-wider px-1 rounded-full ${
+              tile.hiddenState === 'unsafe'
+                ? 'text-amber-300 bg-amber-950/80 border border-amber-500/60'
+                : 'text-cyan-300 bg-cyan-950/80 border border-cyan-500/60'
+            }`}>
+              {tile.hiddenState === 'unsafe' ? 'Unsafe' : 'Safe'}
+            </span>
+          </div>
+        );
         bgColor = 'bg-slate-700';
         borderColor = 'border-slate-900';
       } else {
@@ -808,13 +1049,41 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
       );
     }
 
-    if (isPlayMode && !tile.isGift) {
-      const coveringGift = playTiles.find(g =>
-        g.isGift &&
-        g.z < tile.z &&
-        tile.x >= g.x && tile.x <= g.x + ((GIFT_SIZES[g.mechanic || 'gift2x2']?.cols || g.giftCols || 2) - 1) * 2 &&
-        tile.y >= g.y && tile.y <= g.y + ((GIFT_SIZES[g.mechanic || 'gift2x2']?.rows || g.giftRows || 2) - 1) * 2
+    if (tile.mechanic === 'hidden') {
+      const isSafe = tile.hiddenState !== 'unsafe';
+      overlay = (
+        <div className="absolute inset-0 border-2 border-purple-400/80 rounded-lg z-10 pointer-events-none flex flex-col justify-between p-0.5 shadow-[inset_0_0_8px_rgba(168,85,247,0.35)]">
+          <div className="flex items-center justify-between w-full">
+            <span
+              title={isSafe ? `Safe Hidden Item: Available icons confined strictly to sitting layer ${tile.z}` : `Unsafe Hidden Item: Higher chance of randomness across all layers`}
+              className={`text-[7px] font-black px-1 py-0.2 rounded leading-none shadow-sm ${
+                isSafe
+                  ? 'bg-cyan-500 text-slate-950 border border-cyan-200'
+                  : 'bg-amber-500 text-slate-950 border border-amber-200'
+              }`}
+            >
+              {isSafe ? '🛡️Safe' : '⚠️Unsafe'}
+            </span>
+            <span className="text-[7px] font-mono font-bold text-purple-200 bg-purple-950/90 px-1 py-0.2 rounded border border-purple-700/60 leading-none">
+              L{tile.z}
+            </span>
+          </div>
+          {!isPlayMode && (
+            <div className="flex items-center justify-center pb-0.5">
+              <span className="text-xs font-black text-purple-300 drop-shadow">?</span>
+            </div>
+          )}
+        </div>
       );
+    }
+
+    if (isPlayMode && !tile.isGift) {
+      const coveringGift = playTiles.find(g => {
+        if (!g.isGift || g.z >= tile.z) return false;
+        const gSize = GIFT_SIZES[g.mechanic || ''] || (g.giftCols && g.giftRows ? { cols: g.giftCols, rows: g.giftRows } : { cols: 2, rows: 2 });
+        return tile.x >= g.x && tile.x <= g.x + ((gSize.cols - 1) * 2) &&
+               tile.y >= g.y && tile.y <= g.y + ((gSize.rows - 1) * 2);
+      });
       if (coveringGift) {
         overlay = (
           <>
@@ -1021,151 +1290,640 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
           <div className="bg-amber-950/90 border border-amber-500/80 px-3.5 py-1.5 rounded-full text-amber-200 text-xs font-bold shadow-lg flex items-center gap-2 animate-pulse">
             <span className="w-2.5 h-2.5 rounded-full bg-amber-400 shrink-0" />
             <span>
-              🎁 Gift Placement Mode: Click grid canvas to place {GIFT_SIZES[giftPlacementMode]?.name || 'Gift Box'} on Gift Layer {activeGiftLayer}
+              🎁 Gift Placement Mode: Click grid canvas to place {GIFT_THEMES[activeGiftType]?.label || 'Gift'} ({GIFT_SIZES[giftPlacementMode]?.name || 'Gift Box'}) on Gift Layer {activeGiftLayer}
             </span>
           </div>
         )}
 
-        {isPlayMode && boardMorphism?.enabled && (
-          <div className="bg-purple-950/95 border-2 border-purple-400 px-4 py-2 rounded-xl text-purple-100 text-xs font-black shadow-2xl flex items-center gap-2 animate-bounce z-50">
-            <span className="text-lg">🪞</span>
-            <span>
-              MIRROR MODE ACTIVATED — Board-morphism: Rotated {boardMorphism.spinAngle}° | Mirrored: {boardMorphism.mirroredHorizons ? 'YES' : 'NO'}
-            </span>
-          </div>
-        )}
+        {/* Board Morphism & Level Design Toolbar in Edit Mode */}
+        {mode === 'edit' && (
+          <div className="w-full max-w-xl bg-slate-900/95 border border-purple-500/50 rounded-2xl px-3 py-2 shadow-xl backdrop-blur flex flex-wrap items-center justify-between gap-2 text-xs animate-in fade-in duration-150">
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-1 text-purple-300 font-bold">
+                <span className="text-sm">🌀</span>
+                <span>Morphism:</span>
+              </div>
 
-        {isPlayMode && tileSpectrums.length > 0 && (
-          <div className="bg-purple-900/90 border border-purple-400/70 px-3 py-1.5 rounded-lg text-purple-200 text-xs font-bold shadow flex flex-wrap items-center gap-2 z-50">
-            <span className="text-amber-300 font-extrabold flex items-center gap-1">
-              ✨ Tiles-spectrum Active:
-            </span>
-            {tileSpectrums.map((s, idx) => (
-              <span key={s.id} className="bg-purple-950 text-purple-300 px-2 py-0.5 rounded border border-purple-700 font-mono text-[10px]">
-                #{idx + 1} {s.targetValue} ({s.benefit.replace('_', ' ')})
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* Board Timer Countdown Bar */}
-        {isPlayMode && boardTimer?.enabled && (
-          <div className={`w-full max-w-md bg-slate-900 border rounded-2xl p-3 flex flex-col items-center gap-2 shadow-xl animate-in fade-in zoom-in duration-200 z-50 ${timeLeft < 15 ? 'border-rose-500 animate-pulse bg-rose-950/20' : 'border-amber-500/50'}`}>
-            <div className="flex items-center justify-between w-full text-xs font-bold text-amber-300">
-              <span className="flex items-center gap-1">⏳ Board Timer Countdown</span>
-              <div className="flex items-center gap-2">
-                <span className={`font-mono text-sm ${timeLeft < 15 ? 'text-rose-400 font-extrabold text-base animate-bounce' : 'text-amber-200'}`}>
-                  {timeLeft} seconds
-                </span>
-                {onAddTime && (
+              {/* Scope selector */}
+              <div className="flex items-center gap-0.5 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[10px]">
+                {(['all', 'layer', 'selected'] as MorphismScope[]).map(sc => (
                   <button
-                    onClick={onAddTime}
-                    title="AddTime: +15 seconds to level"
-                    className="px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/35 border border-amber-500/40 text-[10px] font-black text-amber-300 rounded-md transition-colors cursor-pointer flex items-center gap-1 shrink-0 shadow-sm"
+                    key={sc}
+                    onClick={() => setCanvasMorphismScope(sc)}
+                    className={`px-2 py-0.5 rounded font-bold cursor-pointer transition-colors ${
+                      canvasMorphismScope === sc
+                        ? 'bg-purple-600 text-white shadow-xs'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
                   >
-                    <span>+15s</span>
+                    {sc === 'all' ? `All (${tiles.length})` : sc === 'layer' ? `L${targetLayer}` : `Sel (${selectedTileIds.size})`}
                   </button>
-                )}
+                ))}
               </div>
             </div>
-            <div className="w-full h-2.5 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
-              <div
-                className={`h-full transition-all duration-1000 rounded-full ${timeLeft < 15 ? 'bg-rose-500' : 'bg-gradient-to-r from-amber-500 to-yellow-300'}`}
-                style={{ width: `${(timeLeft / boardTimer.duration) * 100}%` }}
-              />
+
+            <div className="flex items-center gap-1 flex-wrap">
+              <button
+                onClick={() => handleCanvasTransform('rotate90cw')}
+                title="Rotate 90° Clockwise"
+                className="px-2 py-1 bg-slate-800 hover:bg-purple-950/80 active:bg-purple-700 border border-slate-700 hover:border-purple-500 text-purple-200 rounded-lg font-bold text-[10px] flex items-center gap-1 cursor-pointer transition-colors"
+              >
+                <RotateCw className="w-3 h-3 text-purple-400" />
+                <span>90° CW</span>
+              </button>
+              <button
+                onClick={() => handleCanvasTransform('rotate90ccw')}
+                title="Rotate 90° Counter-Clockwise"
+                className="px-2 py-1 bg-slate-800 hover:bg-purple-950/80 active:bg-purple-700 border border-slate-700 hover:border-purple-500 text-purple-200 rounded-lg font-bold text-[10px] flex items-center gap-1 cursor-pointer transition-colors"
+              >
+                <RotateCcw className="w-3 h-3 text-purple-400" />
+                <span>90° CCW</span>
+              </button>
+              <button
+                onClick={() => handleCanvasTransform('rotate180')}
+                title="Rotate 180°"
+                className="px-2 py-1 bg-slate-800 hover:bg-purple-950/80 active:bg-purple-700 border border-slate-700 hover:border-purple-500 text-purple-200 rounded-lg font-bold text-[10px] flex items-center gap-1 cursor-pointer transition-colors"
+              >
+                <RefreshCw className="w-3 h-3 text-purple-400" />
+                <span>180°</span>
+              </button>
+              <button
+                onClick={() => handleCanvasTransform('flipH')}
+                title="Flip Horizontal (Mirror X)"
+                className="px-2 py-1 bg-slate-800 hover:bg-purple-950/80 active:bg-purple-700 border border-slate-700 hover:border-purple-500 text-purple-200 rounded-lg font-bold text-[10px] flex items-center gap-0.5 cursor-pointer transition-colors"
+              >
+                <span>↔ Flip H</span>
+              </button>
+              <button
+                onClick={() => handleCanvasSymmetry('radial4')}
+                title="4-Way Radial Symmetry: Clone to all 4 quadrants (90°, 180°, 270°)"
+                className="px-2 py-1 bg-purple-900/60 hover:bg-purple-800 border border-purple-400/60 text-purple-100 rounded-lg font-bold text-[10px] flex items-center gap-1 cursor-pointer transition-colors shadow-xs"
+              >
+                <span>🌸 4-Way</span>
+              </button>
+              <button
+                onClick={() => handleCanvasSymmetry('rotational2')}
+                title="2-Way Rotational Symmetry: Clone 180°"
+                className="px-2 py-1 bg-cyan-900/60 hover:bg-cyan-800 border border-cyan-400/60 text-cyan-100 rounded-lg font-bold text-[10px] flex items-center gap-1 cursor-pointer transition-colors shadow-xs"
+              >
+                <span>☯️ 2-Way</span>
+              </button>
+
+              {boardMorphism?.enabled && boardMorphism?.previewInEditor && (
+                <button
+                  onClick={() => {
+                    setTiles(prev => bakeMorphismToTiles(prev, boardMorphism.spinAngle, boardMorphism.mirroredHorizons));
+                    if (setBoardMorphism) {
+                      setBoardMorphism(prev => ({ ...prev, spinAngle: 0, mirroredHorizons: false }));
+                    }
+                    showNotification('✨ Baked live morphism into map tiles!');
+                  }}
+                  title="Bake current editor morphism angle into map tiles"
+                  className="px-2 py-1 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/60 text-amber-300 rounded-lg font-bold text-[10px] flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  <Sparkles className="w-3 h-3 text-amber-400" />
+                  <span>Bake ({boardMorphism.spinAngle}°)</span>
+                </button>
+              )}
             </div>
           </div>
         )}
 
-        {/* BOSS Battle HP/Player HP Bars */}
-        {isPlayMode && bossBattle?.enabled && (
-          <div className="w-full max-w-md bg-slate-900/90 border border-red-500/60 rounded-2xl p-3.5 flex flex-col gap-2.5 shadow-2xl animate-in fade-in zoom-in duration-200 z-50">
-            {/* Boss HP Bar */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs font-black text-red-400">
-                <span className="flex items-center gap-1">👹 EVIL BOSS HP</span>
-                <span className="font-mono text-sm">{bossHP}%</span>
-              </div>
-              <div className="w-full h-3 bg-slate-950 rounded-full overflow-hidden border border-slate-800 relative">
-                <div
-                  className="h-full bg-gradient-to-r from-red-600 via-red-500 to-orange-400 transition-all duration-300 rounded-full animate-pulse"
-                  style={{ width: `${bossHP}%` }}
-                />
-                <div className="absolute inset-0 flex items-center justify-center text-[9px] font-black text-red-200/45 tracking-widest uppercase">
-                  {bossHP === 0 ? 'DEFEATED' : 'STRIKE MATCHES TO DAMAGE'}
+        {/* Unified Responsive Play Mode HUD Bar: Only shown when timer, boss, morphism, or spectrums are active */}
+        {isPlayMode && (boardTimer?.enabled || bossBattle?.enabled || boardMorphism?.enabled || tileSpectrums.length > 0) && (
+          <div className="w-full max-w-xl bg-slate-900/95 border border-slate-700/80 rounded-2xl px-3 py-2 shadow-2xl backdrop-blur flex flex-wrap items-center justify-between gap-2 z-50 text-xs animate-in fade-in duration-150">
+            {/* Left: Timer, Mirror, Spectrums */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {boardTimer?.enabled && (
+                <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl border ${timeLeft < 15 ? 'bg-rose-950/60 border-rose-500/80 text-rose-300 animate-pulse' : 'bg-slate-950/80 border-amber-500/40 text-amber-200'}`}>
+                  <span className="text-xs">⏳</span>
+                  <span className="font-mono text-xs font-black tracking-tight">{timeLeft}s</span>
+                  {onAddTime && (
+                    <button
+                      onClick={onAddTime}
+                      title="AddTime: +15 seconds"
+                      className="ml-1 px-1.5 py-0.2 bg-amber-500/20 hover:bg-amber-500/40 border border-amber-500/50 text-[9px] font-bold text-amber-300 rounded cursor-pointer transition-colors"
+                    >
+                      +15s
+                    </button>
+                  )}
                 </div>
-              </div>
+              )}
+
+              {boardMorphism?.enabled && (
+                <div className="flex items-center gap-1 bg-purple-950/80 border border-purple-500/50 text-purple-200 px-2 py-1 rounded-xl text-[10px] font-bold">
+                  <span>🪞</span>
+                  <span>{boardMorphism.spinAngle}°</span>
+                  {boardMorphism.mirroredHorizons && <span className="text-purple-400">Flip</span>}
+                </div>
+              )}
+
+              {tileSpectrums.length > 0 && (
+                <div className="flex items-center gap-1 bg-purple-950/80 border border-purple-500/50 text-purple-300 px-2 py-1 rounded-xl text-[10px] font-bold">
+                  <span>✨</span>
+                  <span>{tileSpectrums.length} Spectrum</span>
+                </div>
+              )}
             </div>
 
-            {/* Player HP Bar */}
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs font-black text-emerald-400">
-                <span className="flex items-center gap-1">🛡️ KNIGHT PLAYER HP</span>
-                <span className="font-mono text-sm">{playerHP}%</span>
-              </div>
-              <div className="w-full h-3 bg-slate-950 rounded-full overflow-hidden border border-slate-800 relative">
-                <div
-                  className={`h-full transition-all duration-300 rounded-full ${playerHP <= 25 ? 'bg-rose-600 animate-pulse' : 'bg-gradient-to-r from-emerald-600 to-teal-400'}`}
-                  style={{ width: `${playerHP}%` }}
-                />
-                <div className="absolute inset-0 flex items-center justify-center text-[9px] font-black text-emerald-200/45 tracking-widest uppercase">
-                  {playerHP <= 25 ? 'CRITICAL HP - HEAL / REVIVE NEEDED' : 'FULL TRAY CAUSES -25% DAMAGE'}
+            {/* Center: Boss Battle HP */}
+            {bossBattle?.enabled && (
+              <div className="flex items-center gap-2 bg-slate-950/80 border border-red-500/40 px-2.5 py-1 rounded-xl">
+                {/* Boss HP */}
+                <div className="flex items-center gap-1.5" title="Boss Health">
+                  <span className="text-xs">👹</span>
+                  <div className="w-14 sm:w-16 h-2 bg-slate-800 rounded-full overflow-hidden border border-slate-700">
+                    <div
+                      className="h-full bg-gradient-to-r from-red-600 to-orange-400 transition-all duration-300"
+                      style={{ width: `${bossHP}%` }}
+                    />
+                  </div>
+                  <span className="font-mono text-[10px] font-bold text-red-300">{bossHP}%</span>
+                </div>
+
+                <div className="w-[1px] h-3 bg-slate-700" />
+
+                {/* Player HP */}
+                <div className="flex items-center gap-1.5" title="Player Health (Decreases on full tray)">
+                  <span className="text-xs">🛡️</span>
+                  <div className="w-14 sm:w-16 h-2 bg-slate-800 rounded-full overflow-hidden border border-slate-700">
+                    <div
+                      className={`h-full transition-all duration-300 ${playerHP <= 25 ? 'bg-rose-600 animate-pulse' : 'bg-gradient-to-r from-emerald-500 to-teal-400'}`}
+                      style={{ width: `${playerHP}%` }}
+                    />
+                  </div>
+                  <span className="font-mono text-[10px] font-bold text-emerald-300">{playerHP}%</span>
                 </div>
               </div>
-            </div>
+            )}
+
+            {/* End of Left/Center HUD */}
           </div>
         )}
 
-        {/* Sweet Delivery Active Orders */}
-        {isPlayMode && sweetDelivery?.enabled && (() => {
-          const isRegistryActive = playTiles.some(t => t.assignedIconId != null);
-          const activeOrders = sweetDelivery.orders.filter(
-            orderIcon => !completedOrders.map(String).includes(String(orderIcon))
-          );
+        {/* Dedicated Sweet Delivery Option 1 Showcase Station (Color-Based / Standard Delivery) */}
+        {isPlayMode && sweetDelivery?.enabled && !sweetDelivery.endlessOrder && (() => {
+          const rawItems: DeliveryOrderItem[] = deliveryOrderItems.length > 0 ? deliveryOrderItems : sweetDelivery.orders.map((ord, idx) => ({
+            id: `ord-${idx}`,
+            icon: ord,
+            color: undefined,
+            status: completedOrders.map(String).includes(String(ord)) ? 'completed' : 'active'
+          } as DeliveryOrderItem));
 
-          if (activeOrders.length === 0) return null;
+          const completedCount = rawItems.filter(o => o.status === 'completed' || completedOrders.includes(o.id) || completedOrders.includes(o.icon)).length;
+
+          // Helper to resolve icon component reliably (never fallback to Gift)
+          const getOrderIcon = (iconName: string | undefined) => {
+            if (!iconName) return ICONS.Star;
+            if (ICONS[iconName]) return ICONS[iconName];
+            const norm = iconName.trim().toLowerCase();
+            for (const [key, comp] of Object.entries(ICONS)) {
+              if (key.toLowerCase() === norm) return comp;
+            }
+            const match = playTiles.find(t => (t.baseIcon && t.baseIcon.toLowerCase() === norm) || String(t.assignedIconId) === String(iconName));
+            if (match?.baseIcon && ICONS[match.baseIcon]) {
+              return ICONS[match.baseIcon];
+            }
+            return ICONS.Star;
+          };
+
+          // Helper to resolve color object reliably
+          const getOrderColor = (colorName: string | undefined, iconName?: string) => {
+            if (colorName) {
+              const found = COLORS.find(c => c.id.toLowerCase() === colorName.toLowerCase());
+              if (found) return found;
+            }
+            const match = playTiles.find(t => t.baseIcon === iconName && t.color);
+            if (match?.color) {
+              const found = COLORS.find(c => c.id.toLowerCase() === match.color!.toLowerCase());
+              if (found) return found;
+            }
+            return COLORS[0];
+          };
+
+          // Process each order item: compute freed count on board, tray count, and resolve exact Icon and Color
+          const ordersWithMeta = rawItems.map((ordItem, origIdx) => {
+            const isCompleted = ordItem.status === 'completed' || 
+              completedOrders.includes(ordItem.id) || 
+              completedOrders.includes(ordItem.icon);
+
+            const IconComp = getOrderIcon(ordItem.icon);
+            const colorObj = getOrderColor(ordItem.color, ordItem.icon);
+            const resolvedColor = colorObj.id;
+
+            // How many matching tiles on the board are currently free (unblocked / clickable)?
+            const freedCount = playTiles.filter(t => {
+              if (t.isGift) return false;
+              if (!isTileFree(t, playTiles)) return false;
+              const matchIcon = t.baseIcon === ordItem.icon;
+              if (sweetDelivery.colorBased) {
+                return matchIcon && (t.color || 'yellow') === resolvedColor;
+              }
+              return matchIcon;
+            }).length;
+
+            // Count matching tiles currently in the player's main tray
+            const inTrayCount = container.filter(t => {
+              if (t.isGift) return false;
+              const matchIcon = t.baseIcon === ordItem.icon;
+              if (sweetDelivery.colorBased) {
+                return matchIcon && (t.color || 'yellow') === resolvedColor;
+              }
+              return matchIcon;
+            }).length;
+
+            return {
+              ...ordItem,
+              origIdx,
+              isCompleted,
+              freedCount,
+              inTrayCount,
+              IconComp,
+              colorObj,
+              resolvedColor
+            };
+          });
+
+          // If more than 4 orders are shown, prioritize from the orders that have the most icons freed displayed first
+          const sortedOrders = [...ordersWithMeta].sort((a, b) => {
+            if (a.isCompleted !== b.isCompleted) {
+              return a.isCompleted ? 1 : -1;
+            }
+            if (b.freedCount !== a.freedCount) {
+              return b.freedCount - a.freedCount;
+            }
+            if (b.inTrayCount !== a.inTrayCount) {
+              return b.inTrayCount - a.inTrayCount;
+            }
+            return a.origIdx - b.origIdx;
+          });
+
+          // Max display on UI is 4 orders
+          const displayedOrders = sortedOrders.slice(0, 4);
 
           return (
-            <div className="w-full max-w-md bg-slate-900 border border-cyan-500/50 rounded-2xl p-3.5 flex flex-col gap-3 shadow-2xl animate-in fade-in zoom-in duration-200 z-50">
-              <div className="border-b border-slate-800 pb-1.5 flex justify-center">
-                <span className="text-xs font-black text-cyan-300 flex items-center gap-1 uppercase tracking-wider">
-                  🍬 SWEET DELIVERY CHALLENGE (Max Trays: 5 Slots)
-                </span>
+            <div className="w-full max-w-xl bg-slate-900/95 border-2 border-purple-500/60 rounded-2xl p-2.5 shadow-2xl backdrop-blur space-y-2 animate-in fade-in duration-200 z-40">
+              {/* Header / Status Bar */}
+              <div className="flex items-center justify-between gap-2 flex-wrap pb-1.5 border-b border-slate-800 text-[11px]">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-base">🍬</span>
+                  <span className="font-black text-purple-300 tracking-tight">
+                    Sweet Delivery: {sweetDelivery.colorBased ? 'Option 1 (Color-Based)' : 'Orders'}
+                  </span>
+                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+                    sweetDelivery.colorBased
+                      ? 'text-amber-300 bg-amber-950/80 border-amber-600/40'
+                      : 'text-purple-300 bg-purple-950/80 border-purple-600/40'
+                  }`}>
+                    {sweetDelivery.colorBased ? '🎨 Exact Color + Icon' : 'Matching Icon'}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-mono font-bold text-amber-300 bg-slate-950/90 px-2 py-0.5 rounded border border-amber-600/40">
+                    Fulfilled: {completedCount} / {rawItems.length}
+                  </span>
+
+                  {rawItems.length > 4 && (
+                    <span className="text-[9px] font-mono text-cyan-300 bg-cyan-950/80 px-1.5 py-0.5 rounded border border-cyan-500/40" title="Max display on UI is 4 orders. Prioritized by most freed icons on the board.">
+                      Top 4 of {rawItems.length} (Most Freed)
+                    </span>
+                  )}
+
+                  {bossBattle?.enabled && onBossScramble && (
+                    <div className="flex items-center gap-1 bg-red-950/60 border border-red-500/40 px-2 py-0.5 rounded">
+                      <span className="text-[9px] font-mono text-red-300" title="Moves until next automatic Boss Scramble">
+                        🌀 Scramble: {6 - (bossScrambleMovesCount % 6)}m
+                      </span>
+                      <button
+                        onClick={onBossScramble}
+                        title="Boss Scramble: Reshuffle delivery orders"
+                        className="text-[9px] font-bold text-red-200 hover:text-white bg-red-800/60 hover:bg-red-700/80 px-1.5 py-0.2 rounded transition-colors cursor-pointer"
+                      >
+                        Scramble
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="flex flex-wrap justify-center gap-3">
-                {activeOrders.map((orderIcon, idx) => {
-                  let IconComp: React.ComponentType<{ className?: string }> = Gift;
-                  let colorObj: any = null;
 
-                  if (isRegistryActive) {
-                    const matchedTile = playTiles.find(t => String(t.assignedIconId) === String(orderIcon));
-                    if (matchedTile) {
-                      IconComp = ICONS[matchedTile.baseIcon || ''] || Gift;
-                      colorObj = COLORS.find(c => c.id === matchedTile.color);
-                    }
-                  } else {
-                    IconComp = ICONS[orderIcon] || Gift;
-                  }
+              {/* Informative Subheader */}
+              <div className="flex items-center justify-between text-[9px] text-slate-400 px-1">
+                <span>
+                  {sweetDelivery.colorBased
+                    ? 'Only tiles matching BOTH the exact color and icon will fulfill each order.'
+                    : 'Match 3 tiles of the target icon to fulfill each order.'}
+                  {rawItems.length > 4 ? ' Prioritizing orders with the most freed tiles.' : ''}
+                </span>
+                {bossBattle?.enabled && (
+                  <span className="text-amber-400 font-bold flex items-center gap-1 shrink-0 ml-2">
+                    ⚔️ Orders deal 25 DMG to Boss
+                  </span>
+                )}
+              </div>
 
-                  const iconColorClass = colorObj ? colorObj.class : 'text-cyan-400';
-                  const containerBgClass = colorObj ? colorObj.bg : 'bg-cyan-500/10';
-                  const containerBorderClass = colorObj ? colorObj.border : 'border-cyan-500/30';
+              {/* Orders Grid rendered similar to Option 2 to display the specific icons of each order required to complete */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {displayedOrders.map((ord) => {
+                  const IconComp = ord.IconComp;
+                  const colorObj = ord.colorObj;
+                  const iconColorClass = colorObj ? colorObj.class : 'text-purple-300';
+                  const inTrayCount = Math.min(3, ord.inTrayCount || 0);
 
                   return (
                     <div
-                      key={idx}
-                      className={`flex flex-col items-center justify-center p-3.5 rounded-2xl border bg-slate-950/60 shadow-inner ${containerBorderClass} transition-all duration-300 hover:scale-105 hover:bg-slate-950/80`}
+                      key={ord.id || ord.origIdx}
+                      className={`relative rounded-xl p-2 flex flex-col items-center justify-between gap-1 transition-all ${
+                        ord.isCompleted
+                          ? 'bg-emerald-950/40 border-2 border-emerald-500/80 shadow-[0_0_12px_rgba(16,185,129,0.3)]'
+                          : 'bg-slate-900 border-2 border-purple-500 shadow-md ring-1 ring-purple-400/30'
+                      }`}
                     >
-                      <div className={`flex items-center gap-1.5 p-2 rounded-xl border ${containerBgClass} ${containerBorderClass} shadow-md`}>
-                        <IconComp className={`w-5 h-5 ${iconColorClass}`} />
-                        <IconComp className={`w-5 h-5 ${iconColorClass}`} />
-                        <IconComp className={`w-5 h-5 ${iconColorClass}`} />
-                      </div>
-                      {isRegistryActive && (
-                        <span className="text-[10px] font-mono font-black text-slate-400 mt-2 tracking-wider">
-                          ID: #{orderIcon}
+                      {/* Top Badge */}
+                      <div className="w-full flex items-center justify-between text-[9px] font-bold">
+                        <span className={`px-1.5 py-0.2 rounded font-mono ${
+                          ord.isCompleted ? 'bg-emerald-500 text-slate-950' : 'bg-purple-500 text-white'
+                        }`}>
+                          {ord.isCompleted ? '✓ DONE' : `ORDER #${ord.origIdx + 1}`}
                         </span>
-                      )}
+                        <span className="font-mono text-[10px] text-slate-300">
+                          {ord.isCompleted ? '3/3' : `${inTrayCount}/3`}
+                        </span>
+                      </div>
+
+                      {/* Icon & Requirement Label with detailed 3D tile showcase */}
+                      <div className="flex flex-col items-center my-0.5">
+                        <div className={`w-9 h-9 rounded-lg border-2 flex items-center justify-center shadow-md ${colorObj?.bg || 'bg-slate-800'} ${colorObj?.border || 'border-slate-700'}`}>
+                          <IconComp className={`w-5 h-5 ${iconColorClass}`} />
+                        </div>
+                        <span className="text-[10px] font-bold text-slate-200 mt-1 truncate max-w-[80px]">
+                          {ord.icon}
+                        </span>
+                        {colorObj && (
+                          <span className={`text-[8px] font-bold font-mono px-1 rounded ${colorObj.class} bg-slate-950/80 border border-slate-700 uppercase`}>
+                            {colorObj.id}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* 3 Slots showing the specific icons of this order required to complete */}
+                      <div className="w-full bg-slate-950/80 p-1 rounded-lg border border-slate-800/80 flex items-center justify-center gap-1 mt-0.5">
+                        {[0, 1, 2].map((slotIdx) => {
+                          if (ord.isCompleted) {
+                            return (
+                              <div
+                                key={slotIdx}
+                                className={`w-6 h-6 rounded flex items-center justify-center border shadow-xs animate-in zoom-in-75 duration-150 ${colorObj?.bg || 'bg-emerald-900'} border-emerald-400`}
+                                title={`Delivered tile ${slotIdx + 1}/3: ${ord.icon} (${ord.resolvedColor})`}
+                              >
+                                <IconComp className="w-3.5 h-3.5 text-emerald-200" />
+                              </div>
+                            );
+                          }
+
+                          const hasInTray = slotIdx < inTrayCount;
+                          if (hasInTray) {
+                            return (
+                              <div
+                                key={slotIdx}
+                                className={`w-6 h-6 rounded flex items-center justify-center border shadow-xs animate-in zoom-in-75 duration-150 ring-1 ring-amber-400/80 ${colorObj?.bg || 'bg-purple-900'} ${colorObj?.border || 'border-amber-400'}`}
+                                title={`Collected in tray ${slotIdx + 1}/3: ${ord.icon} (${ord.resolvedColor})`}
+                              >
+                                <IconComp className={`w-3.5 h-3.5 ${colorObj?.class || 'text-amber-200'}`} />
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <div
+                              key={slotIdx}
+                              className={`w-6 h-6 rounded border border-dashed flex items-center justify-center shadow-xs transition-all opacity-70 ${colorObj?.bg || 'bg-slate-900'} ${colorObj?.border || 'border-purple-600/60'}`}
+                              title={`Required tile ${slotIdx + 1}/3: ${ord.icon} (${ord.resolvedColor})`}
+                            >
+                              <IconComp className={`w-3.5 h-3.5 ${colorObj?.class || 'text-purple-300'}`} />
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Status Caption */}
+                      <span className={`text-[8px] font-semibold text-center mt-0.5 ${
+                        ord.isCompleted ? 'text-emerald-400' : 'text-purple-300'
+                      }`}>
+                        {ord.isCompleted
+                          ? 'Order Delivered!'
+                          : inTrayCount > 0
+                          ? `${inTrayCount}/3 in tray (${ord.freedCount} freed)`
+                          : `${ord.freedCount} freed on board`}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Dedicated Sweet Delivery Option 2 Level Progression Order Hub */}
+        {isPlayMode && sweetDelivery?.enabled && sweetDelivery.endlessOrder && (() => {
+          const totalOrdersCount = deliveryOrderItems.length;
+          const completedCount = deliveryOrderItems.filter(o => o.status === 'completed' || (o.subTray?.length ?? 0) >= 3).length;
+
+          // Helper to resolve icon component reliably (never fallback to Gift)
+          const getOrderIcon = (iconName: string | undefined) => {
+            if (!iconName) return ICONS.Star;
+            if (ICONS[iconName]) return ICONS[iconName];
+            const norm = iconName.trim().toLowerCase();
+            for (const [key, comp] of Object.entries(ICONS)) {
+              if (key.toLowerCase() === norm) return comp;
+            }
+            const match = playTiles.find(t => (t.baseIcon && t.baseIcon.toLowerCase() === norm) || String(t.assignedIconId) === String(iconName));
+            if (match?.baseIcon && ICONS[match.baseIcon]) {
+              return ICONS[match.baseIcon];
+            }
+            return ICONS.Star;
+          };
+
+          const getOrderColor = (colorName: string | undefined, iconName?: string) => {
+            if (colorName) {
+              const found = COLORS.find(c => c.id.toLowerCase() === colorName.toLowerCase());
+              if (found) return found;
+            }
+            const match = playTiles.find(t => t.baseIcon === iconName && t.color);
+            if (match?.color) {
+              const found = COLORS.find(c => c.id.toLowerCase() === match.color!.toLowerCase());
+              if (found) return found;
+            }
+            return COLORS[0];
+          };
+
+          // Order display according to the progression of level:
+          // Find the earliest active or queued order to center the 4-slot window on current progression
+          const firstUnfinishedIdx = deliveryOrderItems.findIndex(
+            o => o.status === 'active' || o.status === 'queued'
+          );
+          let startIdx = 0;
+          if (firstUnfinishedIdx !== -1) {
+            // Anchor window so it progresses naturally from level start to end
+            startIdx = Math.max(0, Math.min(firstUnfinishedIdx, deliveryOrderItems.length - 4));
+          } else {
+            startIdx = Math.max(0, deliveryOrderItems.length - 4);
+          }
+          const displayedItems = deliveryOrderItems.slice(startIdx, startIdx + 4);
+
+          return (
+            <div className="w-full max-w-xl bg-slate-900/95 border-2 border-purple-500/60 rounded-2xl p-2.5 shadow-2xl backdrop-blur space-y-2 animate-in fade-in duration-200 z-40">
+              {/* Header / Status Bar */}
+              <div className="flex items-center justify-between gap-2 flex-wrap pb-1.5 border-b border-slate-800 text-[11px]">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-base">🍬</span>
+                  <span className="font-black text-purple-300 tracking-tight">
+                    Sweet Delivery: Option 2 (Level Progression)
+                  </span>
+                  <span className="text-[9px] font-bold text-amber-300 bg-amber-950/80 px-1.5 py-0.5 rounded border border-amber-600/40">
+                    🎨 Color + Icon Match Req.
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-mono font-bold text-amber-300 bg-slate-950/90 px-2 py-0.5 rounded border border-amber-600/40" title="Win when all tiles are cleared or all level orders are fulfilled!">
+                    Fulfilled: {completedCount} / {totalOrdersCount}
+                  </span>
+
+                  <span className="text-[10px] font-mono font-bold text-cyan-300 bg-cyan-950/80 px-2 py-0.5 rounded border border-cyan-500/40" title="Max main tray capacity in Option 2 is reduced to 4 slots. Deadlock = Lose!">
+                    📦 Main Tray: {container.length}/4 Slots
+                  </span>
+
+                  {bossBattle?.enabled && onBossScramble && (
+                    <div className="flex items-center gap-1 bg-red-950/60 border border-red-500/40 px-2 py-0.5 rounded">
+                      <span className="text-[9px] font-mono text-red-300" title="Moves until next automatic Boss Scramble">
+                        🌀 Scramble: {6 - (bossScrambleMovesCount % 6)}m
+                      </span>
+                      <button
+                        onClick={onBossScramble}
+                        title="Boss Scramble: Reshuffle active & queued orders"
+                        className="text-[9px] font-bold text-red-200 hover:text-white bg-red-800/60 hover:bg-red-700/80 px-1.5 py-0.2 rounded transition-colors cursor-pointer"
+                      >
+                        Scramble
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Explanatory Rule Banner */}
+              <div className="flex items-center justify-between text-[9px] text-slate-400 px-1">
+                <span>
+                  Orders display according to level progression. <strong>Win by clearing all tiles or fulfilling all {totalOrdersCount} orders!</strong>
+                </span>
+                {bossBattle?.enabled && (
+                  <span className="text-amber-400 font-bold shrink-0 ml-2">
+                    ⚔️ -25 Boss HP / order
+                  </span>
+                )}
+              </div>
+
+              {/* Sub-Trays Grid (4 orders: 2 Active first, 2 Inactive until previous 2 complete) */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {displayedItems.map((ord, idx) => {
+                  const isActive = ord.status === 'active';
+                  const isCompleted = ord.status === 'completed' || (ord.subTray?.length ?? 0) >= 3;
+
+                  // Find original 1-based order progression number
+                  const origIdx = deliveryOrderItems.findIndex(d => d.id === ord.id);
+                  const orderNum = origIdx !== -1 ? origIdx + 1 : idx + 1;
+
+                  const IconComp = getOrderIcon(ord.icon);
+                  const colorObj = getOrderColor(ord.color, ord.icon);
+                  const resolvedColor = colorObj.id;
+                  const iconColorClass = colorObj ? colorObj.class : 'text-purple-300';
+                  const subTrayCount = ord.subTray?.length || 0;
+
+                  return (
+                    <div
+                      key={ord.id || idx}
+                      className={`relative rounded-xl p-2 flex flex-col items-center justify-between gap-1 transition-all ${
+                        isCompleted
+                          ? 'bg-emerald-950/40 border-2 border-emerald-500/80 shadow-[0_0_12px_rgba(16,185,129,0.3)]'
+                          : isActive
+                          ? 'bg-slate-900 border-2 border-purple-500 shadow-md ring-1 ring-purple-400/30'
+                          : 'bg-slate-950/70 border border-slate-800 opacity-65'
+                      }`}
+                    >
+                      {/* Top Badge */}
+                      <div className="w-full flex items-center justify-between text-[9px] font-bold">
+                        <span className={`px-1.5 py-0.2 rounded font-mono ${
+                          isCompleted
+                            ? 'bg-emerald-500 text-slate-950'
+                            : isActive
+                            ? 'bg-purple-500 text-white'
+                            : 'bg-slate-800 text-slate-400'
+                        }`}>
+                          {isCompleted ? '✓ DONE' : isActive ? `ACTIVE #${orderNum}` : `QUEUED #${orderNum}`}
+                        </span>
+
+                        <span className="font-mono text-[10px] text-slate-300">
+                          {isCompleted ? '3/3' : `${subTrayCount}/3`}
+                        </span>
+                      </div>
+
+                      {/* Icon & Requirement Label with detailed 3D tile showcase */}
+                      <div className="flex flex-col items-center my-0.5">
+                        <div className={`w-9 h-9 rounded-lg border-2 flex items-center justify-center shadow-md ${colorObj?.bg || 'bg-slate-800'} ${colorObj?.border || 'border-slate-700'}`}>
+                          <IconComp className={`w-5 h-5 ${iconColorClass}`} />
+                        </div>
+                        <span className="text-[10px] font-bold text-slate-200 mt-1 truncate max-w-[80px]">
+                          {ord.icon}
+                        </span>
+                        {colorObj && (
+                          <span className={`text-[8px] font-bold font-mono px-1 rounded ${colorObj.class} bg-slate-950/80 border border-slate-700 uppercase`}>
+                            {colorObj.id}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Sub-Tray: 3 Slots containing ONLY matching tiles */}
+                      <div className="w-full bg-slate-950/80 p-1 rounded-lg border border-slate-800/80 flex items-center justify-center gap-1 mt-0.5">
+                        {[0, 1, 2].map(slotIdx => {
+                          const tileInSlot = ord.subTray?.[slotIdx];
+                          if (tileInSlot) {
+                            const tileColorObj = COLORS.find(c => c.id === tileInSlot.color);
+                            const TileIcon = ICONS[tileInSlot.baseIcon || ''] || ICONS.Star;
+                            return (
+                              <div
+                                key={slotIdx}
+                                className={`w-6 h-6 rounded flex items-center justify-center border shadow-xs animate-in zoom-in-75 duration-150 ${tileColorObj?.bg || 'bg-purple-900'} ${tileColorObj?.border || 'border-purple-400'}`}
+                                title={`Delivered tile ${slotIdx + 1}/3: ${tileInSlot.baseIcon} (${tileInSlot.color})`}
+                              >
+                                <TileIcon className={`w-3.5 h-3.5 ${tileColorObj?.class || 'text-purple-200'}`} />
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <div
+                              key={slotIdx}
+                              className={`w-6 h-6 rounded border border-dashed flex items-center justify-center text-[9px] font-mono ${
+                                isActive ? 'border-purple-600/60 text-purple-400/80 bg-slate-900/60' : 'border-slate-800 text-slate-700 bg-slate-950'
+                              }`}
+                              title={isActive ? `Slot ${slotIdx + 1}: Waiting for ${ord.icon} (${resolvedColor})` : 'Locked in queue'}
+                            >
+                              {isActive ? '+' : '🔒'}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Status Caption */}
+                      <span className={`text-[8px] font-semibold text-center mt-0.5 ${
+                        isCompleted ? 'text-emerald-400' : isActive ? 'text-purple-300' : 'text-slate-500'
+                      }`}>
+                        {isCompleted
+                          ? 'Order Delivered!'
+                          : isActive
+                          ? 'Picks route here'
+                          : 'Unlocks in next wave'}
+                      </span>
                     </div>
                   );
                 })}
@@ -1316,17 +2074,241 @@ export const BoardCanvas: React.FC<BoardCanvasProps> = ({
               <span>Clone</span>
             </button>
 
-            {/* Convert Mechanic Button */}
-            {selectedMechanic && selectedMechanic !== 'normal' && (
+            {/* Morphism Rotate & Symmetry on Selection */}
+            <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-purple-900/60">
               <button
-                onClick={() => handleApplyMechanicToSelected(selectedMechanic)}
-                title={`Convert selected tiles to ${selectedMechanic}`}
-                className="flex items-center gap-1 px-2.5 py-1.5 bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/50 text-purple-300 rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-sm"
+                onClick={() => handleCanvasTransform('rotate90cw', 'selected')}
+                title="Rotate Selected 90° Clockwise"
+                className="p-1.5 bg-slate-800 hover:bg-purple-900 active:bg-purple-600 text-purple-300 hover:text-white rounded-lg transition-colors cursor-pointer"
               >
-                <Wand2 className="w-3.5 h-3.5" />
-                <span>Apply {selectedMechanic}</span>
+                <RotateCw className="w-3.5 h-3.5" />
               </button>
-            )}
+              <button
+                onClick={() => handleCanvasTransform('rotate90ccw', 'selected')}
+                title="Rotate Selected 90° Counter-Clockwise"
+                className="p-1.5 bg-slate-800 hover:bg-purple-900 active:bg-purple-600 text-purple-300 hover:text-white rounded-lg transition-colors cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => handleCanvasTransform('flipH', 'selected')}
+                title="Flip Selected Horizontal (Mirror X)"
+                className="px-1.5 py-1 bg-slate-800 hover:bg-purple-900 active:bg-purple-600 text-purple-300 hover:text-white rounded-lg text-xs font-bold transition-colors cursor-pointer"
+              >
+                <span>↔</span>
+              </button>
+              <button
+                onClick={() => handleCanvasSymmetry('radial4', 'selected')}
+                title="4-Way Radial Symmetry: Clone Selected to 4 Quadrants"
+                className="px-2 py-1 bg-purple-950/80 hover:bg-purple-900 active:bg-purple-600 border border-purple-500/50 text-purple-200 hover:text-white rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1"
+              >
+                <span>🌸 4-Way</span>
+              </button>
+            </div>
+
+            {/* Change Special Mechanic Popover Button (strictly excluding Gift) */}
+            <div className="relative">
+              <button
+                onClick={() => setIsMechanicMenuOpen(!isMechanicMenuOpen)}
+                title="Change one or a set of same Special Mechanic tiles into the other (excluding Gift)"
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-sm border ${
+                  isMechanicMenuOpen
+                    ? 'bg-amber-500 text-slate-950 border-amber-300 ring-2 ring-amber-400'
+                    : 'bg-amber-500/20 hover:bg-amber-500/30 border-amber-500/50 text-amber-300'
+                }`}
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isMechanicMenuOpen ? 'animate-spin' : ''}`} />
+                <span>Change Mechanic</span>
+                <ChevronUp className={`w-3 h-3 transition-transform ${isMechanicMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {/* Flyout Popover for Changing Mechanic */}
+              {isMechanicMenuOpen && (
+                <div
+                  onClick={e => e.stopPropagation()}
+                  className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-80 sm:w-96 bg-slate-950/95 border-2 border-amber-500/70 backdrop-blur-md rounded-2xl p-3 shadow-2xl text-slate-200 z-50 animate-in fade-in slide-in-from-bottom-2 duration-150 space-y-2.5"
+                >
+                  {/* Header */}
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                    <div className="flex items-center gap-1.5">
+                      <RefreshCw className="w-4 h-4 text-amber-400" />
+                      <span className="text-xs font-black text-amber-300 uppercase tracking-wide">
+                        Change Mechanic
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-900 border border-slate-700 text-slate-300 font-bold">
+                        {nonGiftSelectedTiles.length} tile{nonGiftSelectedTiles.length !== 1 ? 's' : ''}
+                      </span>
+                      <button
+                        onClick={() => setIsMechanicMenuOpen(false)}
+                        className="p-1 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Source Breakdown / Filter */}
+                  {nonGiftSelectedTiles.length === 0 ? (
+                    <div className="p-3 text-center text-xs text-slate-400 italic">
+                      No regular tiles in selection (Gift boxes are excluded from mechanic swapping).
+                    </div>
+                  ) : (
+                    <>
+                      <div>
+                        <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 mb-1">
+                          <span>1. Mechanic in Selection:</span>
+                          <span className="text-amber-400 font-mono">
+                            {uniqueSelectedMechanics.length === 1 ? 'Uniform Set' : `${uniqueSelectedMechanics.length} Types`}
+                          </span>
+                        </div>
+
+                        {uniqueSelectedMechanics.length === 1 ? (
+                          <div className="flex items-center justify-between p-2 rounded-lg bg-slate-900/90 border border-slate-800 text-xs">
+                            <span className="text-slate-300">
+                              All <span className="font-bold text-white">{nonGiftSelectedTiles.length}</span> tiles are:
+                            </span>
+                            <span className="font-black text-amber-300 uppercase font-mono px-2 py-0.5 rounded bg-amber-950/80 border border-amber-600/60">
+                              {CONVERTIBLE_MECHANICS.find(m => m.id === uniqueSelectedMechanics[0])?.shortLabel || uniqueSelectedMechanics[0]}
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="flex flex-wrap gap-1 bg-slate-900/80 p-1 rounded-lg border border-slate-800">
+                            <button
+                              onClick={() => setSourceMechFilter('all')}
+                              className={`px-2 py-1 rounded text-[10px] font-bold transition-colors cursor-pointer ${
+                                sourceMechFilter === 'all'
+                                  ? 'bg-amber-500 text-slate-950 shadow font-black'
+                                  : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                              }`}
+                            >
+                              All Selected ({nonGiftSelectedTiles.length})
+                            </button>
+                            {uniqueSelectedMechanics.map(mKey => {
+                              const count = selectedMechanicsCounts[mKey];
+                              const mOption = CONVERTIBLE_MECHANICS.find(m => m.id === mKey);
+                              const label = mOption?.shortLabel || mKey;
+                              return (
+                                <button
+                                  key={mKey}
+                                  onClick={() => setSourceMechFilter(mKey)}
+                                  className={`px-2 py-1 rounded text-[10px] font-bold transition-colors cursor-pointer ${
+                                    sourceMechFilter === mKey
+                                      ? 'bg-amber-500 text-slate-950 shadow font-black'
+                                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                                  }`}
+                                >
+                                  {label} ({count})
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Hidden Item Safety controls if hidden tiles are selected */}
+                      {nonGiftSelectedTiles.some(t => t.mechanic === 'hidden') && (
+                        <div className="bg-purple-950/70 border border-purple-500/50 p-2 rounded-xl space-y-1.5">
+                          <div className="flex items-center justify-between text-[10px] font-bold text-purple-200">
+                            <span className="flex items-center gap-1">
+                              <Eye className="w-3.5 h-3.5 text-purple-400" />
+                              <span>Hidden Safety in Selection:</span>
+                            </span>
+                            <button
+                              onClick={() => {
+                                const selHidden = nonGiftSelectedTiles.filter(t => t.mechanic === 'hidden');
+                                const rep = calculateHiddenSafety(selHidden);
+                                showNotification(`Hidden Safety: ${rep.safeCount} Safe (layer-confined), ${rep.unsafeCount} Unsafe`);
+                              }}
+                              className="text-[9px] text-purple-300 hover:text-white underline cursor-pointer"
+                            >
+                              Calculate Safety
+                            </button>
+                          </div>
+                          <div className="flex gap-1.5">
+                            <button
+                              onClick={() => {
+                                setTiles(prev => prev.map(t => {
+                                  if (selectedTileIds.has(t.id) && t.mechanic === 'hidden') {
+                                    return { ...t, hiddenState: 'safe' };
+                                  }
+                                  return t;
+                                }));
+                                showNotification('Set selected hidden tiles to 🛡️ Safe (Layer-confined)');
+                              }}
+                              className="flex-1 py-1 rounded border border-cyan-500/60 bg-cyan-950/70 hover:bg-cyan-900/80 text-cyan-300 font-bold text-[9px] flex items-center justify-center gap-1 cursor-pointer"
+                            >
+                              🛡️ Set Safe (Layer)
+                            </button>
+                            <button
+                              onClick={() => {
+                                setTiles(prev => prev.map(t => {
+                                  if (selectedTileIds.has(t.id) && t.mechanic === 'hidden') {
+                                    return { ...t, hiddenState: 'unsafe' };
+                                  }
+                                  return t;
+                                }));
+                                showNotification('Set selected hidden tiles to ⚠️ Unsafe (Random)');
+                              }}
+                              className="flex-1 py-1 rounded border border-amber-500/60 bg-amber-950/70 hover:bg-amber-900/80 text-amber-300 font-bold text-[9px] flex items-center justify-center gap-1 cursor-pointer"
+                            >
+                              ⚠️ Set Unsafe (Random)
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Target Mechanic Picker */}
+                      <div>
+                        <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 mb-1.5">
+                          <span>2. Transform into:</span>
+                          <span className="text-[9px] text-amber-400 font-semibold">(Except Gift)</span>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 max-h-44 overflow-y-auto pr-0.5">
+                          {CONVERTIBLE_MECHANICS.map(mech => (
+                            <button
+                              key={mech.id}
+                              onClick={() => handleConvertSelectedTiles(mech.id, uniqueSelectedMechanics.length === 1 ? 'all' : sourceMechFilter)}
+                              className={`p-1.5 rounded-lg border text-left flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 ${mech.colorClass}`}
+                            >
+                              <mech.icon className="w-3.5 h-3.5 shrink-0" />
+                              <div className="truncate min-w-0">
+                                <p className="font-bold text-[10px] truncate leading-tight">{mech.shortLabel}</p>
+                                <p className="text-[8px] opacity-70 truncate leading-none">{mech.label.split('(')[0]}</p>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Batch Convert All in Entire Level */}
+                      {((uniqueSelectedMechanics.length === 1) || (sourceMechFilter !== 'all')) && (
+                        <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between">
+                          <span className="text-[9px] text-slate-400 font-medium">Level-wide conversion:</span>
+                          <button
+                            onClick={() => {
+                              const src = uniqueSelectedMechanics.length === 1 ? uniqueSelectedMechanics[0] : sourceMechFilter;
+                              const target = prompt(
+                                `Convert all '${src}' tiles in entire level into which mechanic? Choose: normal, chained1, chained2, ice2, ice3, hidden, eventItem:`,
+                                'ice2'
+                              );
+                              if (target && CONVERTIBLE_MECHANICS.some(m => m.id === target)) {
+                                handleConvertAllInLevel(src, target);
+                              }
+                            }}
+                            className="px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-amber-300 font-bold text-[9px] flex items-center gap-1 cursor-pointer transition-colors"
+                          >
+                            <Sparkles className="w-3 h-3 text-amber-400" />
+                            <span>Convert All Matching in Level</span>
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
 
             {/* Save as Cluster Button */}
             {setClusters && (

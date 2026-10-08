@@ -1,5 +1,5 @@
-import { Tile, BoosterAvailability, ThemeIconRegistry } from '../types/game';
-import { GIFT_SIZES, BOOSTER_TYPES } from '../constants/gameConfig';
+import { Tile, BoosterAvailability, ThemeIconRegistry, DeliveryOrderItem, HiddenSafetyReport } from '../types/game';
+import { GIFT_SIZES, BOOSTER_TYPES, ICONS, COLORS } from '../constants/gameConfig';
 
 export function findLastIndex<T>(array: T[], predicate: (value: T, index: number, array: T[]) => boolean): number {
   for (let i = array.length - 1; i >= 0; i--) {
@@ -376,7 +376,7 @@ export const checkComboBalance = (tiles: Tile[]) => {
 };
 
 export const isGiftBlocked = (gift: Tile, allTiles: Tile[]): boolean => {
-  const size = GIFT_SIZES[gift.mechanic || 'gift2x1'];
+  const size = GIFT_SIZES[gift.mechanic || ''] || (gift.giftCols && gift.giftRows ? { cols: gift.giftCols, rows: gift.giftRows, name: `Gift ${gift.giftCols}×${gift.giftRows}` } : GIFT_SIZES.gift2x2);
   if (!size) return false;
 
   const gEndX = gift.x + (size.cols - 1) * 2;
@@ -668,3 +668,433 @@ export const shuffleIcons = (boardTiles: Tile[], targetMatches: number): Tile[] 
 
   return bestBoard;
 };
+
+export const generateLevelProgressionOrders = (
+  boardTiles: Tile[],
+  colorBased: boolean = true,
+  maxOrdersLimit?: number
+): DeliveryOrderItem[] => {
+  const matchable = boardTiles.filter(t => !t.isGift && t.baseIcon);
+
+  // Group tiles by (baseIcon + color)
+  const groupMap = new Map<string, Tile[]>();
+  matchable.forEach(t => {
+    const color = t.color || 'yellow';
+    const key = colorBased ? `${t.baseIcon}__${color}` : (t.baseIcon || 'Star');
+    const list = groupMap.get(key) || [];
+    list.push(t);
+    groupMap.set(key, list);
+  });
+
+  interface TripletProgression {
+    icon: string;
+    color: string;
+    tiles: Tile[];
+    maxZ: number;
+    avgZ: number;
+    avgY: number;
+    avgX: number;
+  }
+
+  const triplets: TripletProgression[] = [];
+
+  groupMap.forEach((tileList) => {
+    // Sort tiles within the group by z descending (topmost accessible layer first)
+    const sorted = [...tileList].sort((a, b) => b.z - a.z);
+
+    // Form triplets of 3 tiles
+    for (let i = 0; i < sorted.length; i += 3) {
+      const chunk = sorted.slice(i, i + 3);
+      if (chunk.length >= 3) {
+        const maxZ = Math.max(chunk[0].z, chunk[1].z, chunk[2].z);
+        const avgZ = (chunk[0].z + chunk[1].z + chunk[2].z) / 3;
+        const avgY = (chunk[0].y + chunk[1].y + chunk[2].y) / 3;
+        const avgX = (chunk[0].x + chunk[1].x + chunk[2].x) / 3;
+
+        triplets.push({
+          icon: chunk[0].baseIcon!,
+          color: chunk[0].color || 'yellow',
+          tiles: chunk,
+          maxZ,
+          avgZ,
+          avgY,
+          avgX
+        });
+      }
+    }
+  });
+
+  // Sort triplets according to progression of level:
+  // Topmost accessible layers (highest maxZ / avgZ) appear first in the progression!
+  triplets.sort((a, b) => {
+    if (b.maxZ !== a.maxZ) return b.maxZ - a.maxZ;
+    if (b.avgZ !== a.avgZ) return b.avgZ - a.avgZ;
+    if (a.avgY !== b.avgY) return a.avgY - b.avgY;
+    return a.avgX - b.avgX;
+  });
+
+  // If level doesn't have exact triplets or has leftover tiles, create minimum 4 orders if possible
+  const selectedTriplets = maxOrdersLimit && maxOrdersLimit > 0
+    ? triplets.slice(0, maxOrdersLimit)
+    : triplets;
+
+  // Fallback: if triplets is empty, generate from available pool
+  if (selectedTriplets.length === 0) {
+    return generateDeliveryOrdersFromBoard(boardTiles, colorBased, Math.max(4, maxOrdersLimit || 4), 'queued');
+  }
+
+  return selectedTriplets.map((trip, idx) => ({
+    id: `ord-prog-${idx}-${trip.icon}-${trip.color}`,
+    icon: trip.icon,
+    color: trip.color,
+    status: 'queued' as const,
+    subTray: [],
+    requiredCount: 3
+  }));
+};
+
+export const generateDeliveryOrdersFromBoard = (
+  boardTiles: Tile[],
+  colorBased: boolean | undefined,
+  countNeeded: number,
+  status: 'active' | 'queued' = 'queued'
+): DeliveryOrderItem[] => {
+  const countMap = new Map<string, { icon: string; color: string; count: number }>();
+  boardTiles.forEach(t => {
+    if (!t.baseIcon || t.isGift) return;
+    const color = t.color || 'yellow';
+    const key = colorBased ? `${t.baseIcon}__${color}` : t.baseIcon;
+    const existing = countMap.get(key);
+    if (existing) {
+      existing.count++;
+    } else {
+      countMap.set(key, { icon: t.baseIcon, color, count: 1 });
+    }
+  });
+
+  const available = Array.from(countMap.values());
+  const with3 = available.filter(a => a.count >= 3);
+  const pool = with3.length >= countNeeded ? with3 : (available.length > 0 ? available : []);
+
+  const shuffled = [...pool].sort(() => Math.random() - 0.5);
+  const newOrders: DeliveryOrderItem[] = [];
+  const pickedKeys = new Set<string>();
+
+  for (let i = 0; i < countNeeded; i++) {
+    let pick = shuffled.find(p => !pickedKeys.has(`${p.icon}__${p.color}`));
+    if (!pick) {
+      pick = shuffled[i % Math.max(1, shuffled.length)];
+    }
+    if (pick) {
+      pickedKeys.add(`${pick.icon}__${pick.color}`);
+    } else {
+      pick = {
+        icon: Object.keys(ICONS)[Math.floor(Math.random() * Object.keys(ICONS).length)],
+        color: COLORS[Math.floor(Math.random() * COLORS.length)].id,
+        count: 3
+      };
+    }
+
+    newOrders.push({
+      id: `ord-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+      icon: pick.icon,
+      color: pick.color,
+      status,
+      subTray: [],
+      requiredCount: 3
+    });
+  }
+
+  return newOrders;
+};
+
+export const transferMatchingTilesToSubTrays = (
+  mainTray: Tile[],
+  orders: DeliveryOrderItem[],
+  forceExactColorMatch: boolean = true
+): DeliveryOrderItem[] => {
+  const updatedOrders = orders.map(o => ({
+    ...o,
+    subTray: [...(o.subTray || [])]
+  }));
+
+  for (const order of updatedOrders) {
+    if (order.status !== 'active') continue;
+    while ((order.subTray?.length ?? 0) < 3) {
+      const matchIdx = mainTray.findIndex(t => {
+        if (forceExactColorMatch) {
+          return t.baseIcon === order.icon && (t.color || 'yellow') === (order.color || 'yellow');
+        }
+        return t.baseIcon === order.icon;
+      });
+      if (matchIdx !== -1) {
+        const [pulled] = mainTray.splice(matchIdx, 1);
+        order.subTray = [...(order.subTray || []), pulled];
+      } else {
+        break;
+      }
+    }
+    if ((order.subTray?.length ?? 0) >= 3) {
+      order.status = 'completed';
+    }
+  }
+
+  return updatedOrders;
+};
+
+/**
+ * Calculates the Safe or Unsafe hidden state of Hidden Item tiles in the level.
+ * 
+ * Safe State:
+ *   - Spreads available icons exclusively on its sitting layer (t.z).
+ *   - Other layers cannot be accounted for in the available options for placing icons inside.
+ *   - Self-sufficient if sitting layer has enough tiles (>= 3 tiles) to form matching pairs.
+ * 
+ * Unsafe State:
+ *   - Works as normal with higher chance of randomness drawn from the global pool across all layers.
+ */
+export const calculateHiddenSafety = (tiles: Tile[]): HiddenSafetyReport => {
+  const matchable = tiles.filter(t => !t.isGift);
+  const hiddenTiles = matchable.filter(t => t.mechanic === 'hidden');
+
+  const byLayer: HiddenSafetyReport['byLayer'] = {};
+  const tileDetails: HiddenSafetyReport['tileDetails'] = [];
+
+  // Group tiles by layer
+  const tilesByLayer: Record<number, Tile[]> = {};
+  matchable.forEach(t => {
+    if (!tilesByLayer[t.z]) tilesByLayer[t.z] = [];
+    tilesByLayer[t.z].push(t);
+  });
+
+  // Populate byLayer stats
+  Object.entries(tilesByLayer).forEach(([layerStr, lTiles]) => {
+    const layer = Number(layerStr);
+    const lHidden = lTiles.filter(t => t.mechanic === 'hidden');
+    const availableIcons = Array.from(new Set(lTiles.map(t => t.baseIcon).filter(Boolean))) as string[];
+    const isSelfSufficient = lTiles.length >= 3;
+
+    byLayer[layer] = {
+      layer,
+      totalTiles: lTiles.length,
+      hiddenTiles: lHidden.length,
+      safeTiles: 0,
+      unsafeTiles: 0,
+      availableIcons,
+      isSelfSufficient
+    };
+  });
+
+  let safeCount = 0;
+  let unsafeCount = 0;
+
+  hiddenTiles.forEach(tile => {
+    const layer = tile.z;
+    const lTiles = tilesByLayer[layer] || [];
+    const isSelfSufficient = lTiles.length >= 3;
+
+    // Determine state
+    let state: 'safe' | 'unsafe';
+    let reason: string;
+
+    if (tile.hiddenState === 'unsafe') {
+      state = 'unsafe';
+      reason = 'Unsafe: Configured as Unsafe (higher chance of randomness across all layers).';
+    } else if (tile.hiddenState === 'safe') {
+      if (isSelfSufficient) {
+        state = 'safe';
+        reason = `Safe: Icons spread exclusively on sitting Layer ${layer} (${lTiles.length} tiles on layer). Other layers cannot be accounted for.`;
+      } else {
+        state = 'unsafe';
+        reason = `Unsafe: Layer ${layer} has only ${lTiles.length} tile(s) (< 3). Cannot sustain a self-contained match on sitting layer alone.`;
+      }
+    } else {
+      // Auto-calculated state when not explicitly set
+      if (isSelfSufficient) {
+        state = 'safe';
+        reason = `Safe (Auto): Sitting Layer ${layer} has ${lTiles.length} tiles (>= 3). Available icons confined to sitting layer.`;
+      } else {
+        state = 'unsafe';
+        reason = `Unsafe (Auto): Sitting Layer ${layer} has only ${lTiles.length} tile(s). Requires other layers, increasing risk of deadlock/randomness.`;
+      }
+    }
+
+    if (state === 'safe') {
+      safeCount++;
+      if (byLayer[layer]) byLayer[layer].safeTiles++;
+    } else {
+      unsafeCount++;
+      if (byLayer[layer]) byLayer[layer].unsafeTiles++;
+    }
+
+    tileDetails.push({
+      tileId: tile.id,
+      x: tile.x,
+      y: tile.y,
+      z: tile.z,
+      state,
+      sittingLayer: layer,
+      layerTileCount: lTiles.length,
+      isSelfSufficient,
+      reason
+    });
+  });
+
+  return {
+    totalHidden: hiddenTiles.length,
+    safeCount,
+    unsafeCount,
+    byLayer,
+    tileDetails
+  };
+};
+
+/**
+ * Automatically calculates and applies Safe/Unsafe hiddenState to tiles.
+ */
+export const calculateAndApplyHiddenSafety = (
+  tiles: Tile[],
+  targetMode: 'auto' | 'all-safe' | 'all-unsafe' = 'auto',
+  targetTileIds?: Set<string>
+): Tile[] => {
+  const matchable = tiles.filter(t => !t.isGift);
+  const tilesByLayer: Record<number, Tile[]> = {};
+  matchable.forEach(t => {
+    if (!tilesByLayer[t.z]) tilesByLayer[t.z] = [];
+    tilesByLayer[t.z].push(t);
+  });
+
+  return tiles.map(tile => {
+    if (tile.isGift || tile.mechanic !== 'hidden') return tile;
+    if (targetTileIds && !targetTileIds.has(tile.id)) return tile;
+
+    const layerTiles = tilesByLayer[tile.z] || [];
+    const isSelfSufficient = layerTiles.length >= 3;
+
+    let nextState: 'safe' | 'unsafe';
+    if (targetMode === 'all-unsafe') {
+      nextState = 'unsafe';
+    } else if (targetMode === 'all-safe') {
+      nextState = 'safe';
+    } else {
+      // auto
+      nextState = isSelfSufficient ? 'safe' : 'unsafe';
+    }
+
+    return {
+      ...tile,
+      hiddenState: nextState
+    };
+  });
+};
+
+/**
+ * Spreads available icons for Safe Hidden items on their sitting layer,
+ * strictly forbidding other layers from accounting for the available options.
+ * Unsafe hidden tiles work as normal with higher chance of randomness.
+ */
+export const distributeIconsWithHiddenSafety = (
+  tiles: Tile[],
+  pool: Array<{ i: string; c: string }>,
+  allPossible: Array<{ i: string; c: string }>
+): {
+  tiles: Tile[];
+  safeHiddenCount: number;
+  unsafeHiddenCount: number;
+} => {
+  const matchable = tiles.filter(t => !t.isGift);
+  const giftTiles = tiles.filter(t => t.isGift);
+
+  if (matchable.length === 0) {
+    return { tiles, safeHiddenCount: 0, unsafeHiddenCount: 0 };
+  }
+
+  // Identify safe and unsafe hidden tiles
+  const safeHidden = matchable.filter(t => t.mechanic === 'hidden' && (t.hiddenState === 'safe' || t.hiddenState === undefined));
+  const unsafeHidden = matchable.filter(t => t.mechanic === 'hidden' && t.hiddenState === 'unsafe');
+
+  // Group tiles by layer
+  const layerMap = new Map<number, Tile[]>();
+  matchable.forEach(t => {
+    const list = layerMap.get(t.z) || [];
+    list.push(t);
+    layerMap.set(t.z, list);
+  });
+
+  // Track assigned icon/color for each tile
+  const assigned = new Map<string, { i: string; c: string }>();
+
+  // For each layer with Safe Hidden tiles, allocate distinct triplets on that sitting layer first
+  layerMap.forEach((layerTiles, layerZ) => {
+    const layerSafeHidden = layerTiles.filter(t => t.mechanic === 'hidden' && (t.hiddenState === 'safe' || t.hiddenState === undefined));
+    if (layerSafeHidden.length === 0) return;
+
+    // Available pool dedicated for this sitting layer
+    // Other layers CANNOT be accounted for
+    const layerPool = [...pool].sort(() => Math.random() - 0.5);
+    // Determine how many layer triplets can be dedicated
+    const numLayerTriplets = Math.max(1, Math.ceil(layerSafeHidden.length / 3));
+
+    // Choose icons for sitting layer
+    const layerChosenIcons: Array<{ i: string; c: string }> = [];
+    for (let k = 0; k < numLayerTriplets; k++) {
+      layerChosenIcons.push(layerPool[k % layerPool.length]);
+    }
+
+    // Spread available icons on this sitting layer among safe hidden tiles and companion layer tiles
+    let safeHiddenIdx = 0;
+    layerSafeHidden.forEach(t => {
+      const pick = layerChosenIcons[safeHiddenIdx % layerChosenIcons.length];
+      assigned.set(t.id, pick);
+      safeHiddenIdx++;
+    });
+
+    // Also place matching twin/triplet tiles on this same sitting layer if other tiles exist on this layer
+    const remainingLayerTiles = layerTiles.filter(t => !assigned.has(t.id));
+    let remIdx = 0;
+    // For each safe hidden icon, ensure companion tiles on the same layer have this icon
+    layerChosenIcons.forEach(icon => {
+      const neededCompanions = 2;
+      for (let c = 0; c < neededCompanions && remIdx < remainingLayerTiles.length; c++) {
+        assigned.set(remainingLayerTiles[remIdx].id, icon);
+        remIdx++;
+      }
+    });
+  });
+
+  // For all remaining unassigned tiles (including Unsafe Hidden tiles and normal tiles):
+  // Unsafe works as normal with higher chance of randomness from pool or allPossible!
+  const unassignedTiles = matchable.filter(t => !assigned.has(t.id));
+  const remainingSets = Math.ceil(unassignedTiles.length / 3);
+  const remainingTriplets: Array<{ i: string; c: string }> = [];
+
+  for (let s = 0; s < remainingSets; s++) {
+    // If unsafe hidden tiles exist, introduce higher chance of randomness (broader variants from allPossible)
+    const sourcePool = unsafeHidden.length > 0 && Math.random() < 0.6 ? allPossible : pool;
+    const v = sourcePool[Math.floor(Math.random() * sourcePool.length)];
+    remainingTriplets.push(v, v, v);
+  }
+  remainingTriplets.sort(() => Math.random() - 0.5);
+
+  let tripIdx = 0;
+  unassignedTiles.forEach(t => {
+    const pair = remainingTriplets[tripIdx++] || pool[Math.floor(Math.random() * pool.length)];
+    assigned.set(t.id, pair);
+  });
+
+  const updatedTiles = matchable.map(t => {
+    const pair = assigned.get(t.id);
+    return {
+      ...t,
+      baseIcon: pair ? pair.i : t.baseIcon,
+      color: pair ? pair.c : t.color,
+    };
+  });
+
+  return {
+    tiles: [...updatedTiles, ...giftTiles],
+    safeHiddenCount: safeHidden.length,
+    unsafeHiddenCount: unsafeHidden.length
+  };
+};
+

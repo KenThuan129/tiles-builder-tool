@@ -30,6 +30,7 @@ interface HeaderProps {
   slotExpandUsed: number;
   bossBattleEnabled?: boolean;
   sweetDeliveryEnabled?: boolean;
+  sweetDeliveryEndless?: boolean;
   tiles: Tile[];
   giftsRevealed: number;
   eventItemsCollected: number;
@@ -66,6 +67,7 @@ export const Header: React.FC<HeaderProps> = ({
   slotExpandUsed,
   bossBattleEnabled = false,
   sweetDeliveryEnabled = false,
+  sweetDeliveryEndless = false,
   tiles,
   giftsRevealed,
   eventItemsCollected,
@@ -78,9 +80,14 @@ export const Header: React.FC<HeaderProps> = ({
   canUndoEdit = false,
   canRedoEdit = false,
 }) => {
+  const isEndless = sweetDeliveryEnabled && sweetDeliveryEndless;
+  const isTrayRestricted = sweetDeliveryEnabled || bossBattleEnabled;
+  const baseSlots = isEndless ? 4 : (isTrayRestricted ? 5 : 7);
+  const maxSlots = baseSlots + slotExpandUsed;
+
   return (
-    <header className="min-h-14 sm:min-h-16 py-2 px-3 sm:px-6 border-b border-slate-800 flex flex-wrap lg:flex-nowrap items-center justify-between gap-2 bg-slate-800/80 backdrop-blur shrink-0 z-30">
-      <div className="flex items-center gap-2">
+    <header className="h-14 sm:h-16 px-3 sm:px-6 border-b border-slate-800 flex items-center justify-between gap-2 bg-slate-800/80 backdrop-blur shrink-0 z-30 transition-all duration-200">
+      <div className="flex items-center gap-2 shrink-0">
         <button
           onClick={() => setIsLeftSidebarOpen(!isLeftSidebarOpen)}
           title="Toggle Tools Sidebar"
@@ -98,8 +105,8 @@ export const Header: React.FC<HeaderProps> = ({
           className="text-left group cursor-pointer"
           title="Return to Landing Page"
         >
-          <h1 className="text-sm sm:text-base lg:text-xl font-black bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent tracking-tight whitespace-nowrap group-hover:brightness-110 transition-all">
-            TILES MATCH TOOL
+          <h1 className="text-xs sm:text-base lg:text-xl font-black bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent tracking-tight whitespace-nowrap group-hover:brightness-110 transition-all">
+            TILES MATCH
           </h1>
         </button>
 
@@ -116,32 +123,32 @@ export const Header: React.FC<HeaderProps> = ({
         ) : (
           <button
             onClick={onOpenSubscribe}
-            className="flex items-center gap-1 bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 px-2 py-0.5 rounded-full text-[10px] font-bold transition-all cursor-pointer"
+            className="hidden sm:flex items-center gap-1 bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 px-2 py-0.5 rounded-full text-[10px] font-bold transition-all cursor-pointer"
             title="Free Mode (Click to Upgrade)"
           >
             <Sparkles className="w-3 h-3" />
-            <span>FREE MODE</span>
+            <span>FREE</span>
           </button>
         )}
       </div>
 
       {mode === 'play' && (
-        <div className="order-3 lg:order-none w-full lg:w-auto flex-1 flex justify-center my-1 lg:my-0 lg:mx-4">
-          <div className="flex items-center gap-2 bg-slate-700 p-1.5 sm:p-2 rounded-xl border-b-2 sm:border-b-4 border-slate-900 shadow-inner max-w-full overflow-x-auto justify-start">
-            <div className="flex gap-1 sm:gap-2 shrink-0">
-              {[...Array((sweetDeliveryEnabled ? 5 : 7) + slotExpandUsed)].map((_, i) => (
-                <div key={i} className="w-8 h-8 sm:w-10 sm:h-10 bg-slate-800 rounded shadow-inner border border-slate-900 relative shrink-0">
+        <div className="flex-1 flex items-center justify-center min-w-0 mx-2 transition-all duration-200">
+          <div className="flex items-center gap-1.5 sm:gap-2 bg-slate-700/90 px-1.5 sm:px-2 py-1 rounded-xl border-b-2 border-slate-900 shadow-inner max-w-full overflow-x-auto">
+            <div className="flex gap-1 sm:gap-1.5 shrink-0">
+              {[...Array(maxSlots)].map((_, i) => (
+                <div key={i} className="w-7 h-7 sm:w-9 sm:h-9 bg-slate-800 rounded shadow-inner border border-slate-900 relative shrink-0">
                   {container[i] && (
                     container[i].mechanic === 'eventItem' ? (
-                      <div className="absolute inset-0 rounded flex items-center justify-center bg-yellow-100 border-yellow-400 border-b-2 sm:border-b-4">
-                        <Leaf className="w-4 h-4 sm:w-6 sm:h-6 text-yellow-600" />
+                      <div className="absolute inset-0 rounded flex items-center justify-center bg-yellow-100 border-yellow-400 border-b-2">
+                        <Leaf className="w-4 h-4 text-yellow-600" />
                       </div>
                     ) : (
                       <div className={`absolute inset-0 rounded flex items-center justify-center 
                         ${COLORS.find(c => c.id === container[i].color)?.bg} 
-                        ${COLORS.find(c => c.id === container[i].color)?.border} border-b-2 sm:border-b-4`}>
+                        ${COLORS.find(c => c.id === container[i].color)?.border} border-b-2`}>
                         {ICONS[container[i].baseIcon || 'Star'] && React.createElement(ICONS[container[i].baseIcon || 'Star'], {
-                          className: `w-4 h-4 sm:w-6 sm:h-6 ${COLORS.find(c => c.id === container[i].color)?.class}`
+                          className: `w-4 h-4 sm:w-5 sm:h-5 ${COLORS.find(c => c.id === container[i].color)?.class}`
                         })}
                       </div>
                     )
@@ -150,12 +157,23 @@ export const Header: React.FC<HeaderProps> = ({
               ))}
             </div>
 
+            {isTrayRestricted && (
+              <span className="text-[9px] font-mono font-bold text-amber-300 bg-amber-950/80 px-1.5 py-0.5 rounded border border-amber-600/40 shrink-0" title={`Modes active (${isEndless ? 'Endless Order' : 'Boss Battle / Sweet Delivery'}) restrict the maximum tray capacity to ${baseSlots} slots.`}>
+                {baseSlots} MAX
+              </span>
+            )}
+            {slotExpandUsed > 0 && (
+              <span className="text-[9px] font-mono font-bold text-emerald-300 bg-emerald-950/80 px-1.5 py-0.5 rounded border border-emerald-600/40 shrink-0">
+                +{slotExpandUsed}
+              </span>
+            )}
+
             {(tiles.some(t => t.isGift) || tiles.some(t => t.mechanic === 'eventItem')) && (
-              <div className="flex flex-col gap-1 ml-1 sm:ml-2 pl-1 sm:pl-2 border-l border-slate-600 shrink-0">
+              <div className="hidden sm:flex items-center gap-1 ml-1 pl-1 border-l border-slate-600 shrink-0">
                 {tiles.some(t => t.isGift) && (
                   <div className="flex items-center gap-1 bg-amber-900/40 border border-amber-600/50 rounded px-1.5 py-0.5">
                     <Gift className="w-3 h-3 text-amber-400" />
-                    <span className="text-[10px] sm:text-[11px] font-bold text-amber-200">
+                    <span className="text-[10px] font-bold text-amber-200">
                       {giftsRevealed}/{tiles.filter(t => t.isGift).length}
                     </span>
                   </div>
@@ -163,7 +181,7 @@ export const Header: React.FC<HeaderProps> = ({
                 {tiles.some(t => t.mechanic === 'eventItem') && (
                   <div className="flex items-center gap-1 bg-emerald-900/40 border border-emerald-600/50 rounded px-1.5 py-0.5">
                     <Leaf className="w-3 h-3 text-emerald-400" />
-                    <span className="text-[10px] sm:text-[11px] font-bold text-emerald-200">
+                    <span className="text-[10px] font-bold text-emerald-200">
                       {eventItemsCollected}/{tiles.filter(t => t.mechanic === 'eventItem').length * 2}
                     </span>
                   </div>

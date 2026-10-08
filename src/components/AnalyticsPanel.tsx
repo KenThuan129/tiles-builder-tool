@@ -338,7 +338,14 @@ export const AnalyticsPanel: React.FC<AnalyticsPanelProps> = ({
                       const subScore = qty * perUnit;
                       return (
                         <div key={mechKey} className="flex justify-between items-center text-[11px]">
-                          <span className="text-slate-300 font-medium uppercase">{mechKey} ({qty}x)</span>
+                          <span className="text-slate-300 font-medium uppercase">
+                            {mechKey} ({qty}x)
+                            {mechKey === 'hidden' && (
+                              <span className="text-[9px] text-cyan-400 lowercase ml-1 font-mono">
+                                ({tiles.filter(t => t.mechanic === 'hidden' && t.hiddenState !== 'unsafe').length} safe, {tiles.filter(t => t.mechanic === 'hidden' && t.hiddenState === 'unsafe').length} unsafe)
+                              </span>
+                            )}
+                          </span>
                           <span className="font-mono text-purple-400">+{subScore.toFixed(2)}</span>
                         </div>
                       );

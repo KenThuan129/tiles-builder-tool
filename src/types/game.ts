@@ -1,7 +1,7 @@
 import { ComponentType } from 'react';
 
 export type ViewportPresetKey = 'default' | 'mobile' | 'tablet' | 'desktop';
-export type EditorTool = 'place' | 'erase' | 'select';
+export type EditorTool = 'place' | 'erase' | 'select' | 'gift';
 
 export interface ViewportPreset {
   label: string;
@@ -29,11 +29,16 @@ export interface Tile {
   isEventItemActive?: boolean;
   isRevealed?: boolean;
 
+  // Hidden item specific fields
+  hiddenState?: 'safe' | 'unsafe';
+
   // Gift specific fields
   isGift?: boolean;
   giftCols?: number;
   giftRows?: number;
   isRevealedInPlay?: boolean;
+  giftType?: string;
+  giftVisual?: number;
 
   // Internal export helpers
   _assignedIconId?: number | null;
@@ -154,6 +159,31 @@ export interface SuggestParams {
   combinedPct: number | string;
   combinedMaxSize: number | string;
   enableeventItemLeaf: boolean;
+
+  // Feature 2: Layer sample at layer 0 only
+  layer0SampleOnly?: boolean;
+
+  // Feature 3: Difficulty Mod Band, Range of Levels, Board & Special Mechanics
+  difficultyBand?: string;
+  levelRangePreset?: string;
+  levelNumber?: number;
+
+  // Special tile mechanics settings
+  hiddenSafetyMode?: 'safe' | 'unsafe';
+  includeGifts?: boolean;
+  giftCount?: number;
+
+  // Board mechanics settings
+  boardTimerEnabled?: boolean;
+  boardTimerDuration?: number;
+  boardMorphismEnabled?: boolean;
+  boardMorphismSymmetry?: 'none' | 'horizontal' | 'vertical' | 'quad' | 'rot90';
+  bossBattleEnabled?: boolean;
+  bossBattleHP?: number;
+  sweetDeliveryEnabled?: boolean;
+  sweetDeliveryOrdersCount?: number;
+  sweetDeliveryEndless?: boolean;
+  boardShuffleEnabled?: boolean;
 }
 
 export interface DifficultyStats {
@@ -219,6 +249,7 @@ export interface BoardMorphismConfig {
   enabled: boolean;
   spinAngle: number;
   mirroredHorizons: boolean;
+  previewInEditor?: boolean;
 }
 
 export interface BoardTimerConfig {
@@ -236,9 +267,22 @@ export interface BossBattleConfig {
   maxHP: number;
 }
 
+export interface DeliveryOrderItem {
+  id: string;
+  icon: string;
+  color?: string;
+  status: 'active' | 'queued' | 'completed';
+  subTray?: Tile[];
+  requiredCount?: number;
+}
+
 export interface SweetDeliveryConfig {
   enabled: boolean;
-  orders: string[]; // List of 4 icon names that represent active orders
+  colorBased?: boolean;
+  endlessOrder?: boolean;
+  maxOrders?: number; // Customizable number of orders, capped at [(total tiles count / 3) - 2]
+  orders: string[]; // List of icon names that represent active orders
+  orderItems?: DeliveryOrderItem[];
 }
 
 export type TileSpectrumBenefit = 'bonus_score' | 'wildcard_match' | 'clear_surrounding' | 'double_booster';
@@ -250,4 +294,54 @@ export interface TileSpectrumEntry {
   targetValue: string;
   benefit: TileSpectrumBenefit;
   duration: TileSpectrumDuration;
+}
+
+export type GiftCategoryKey = 'Mini' | 'Compact' | 'Strip' | 'Standard' | 'Large' | 'Grand' | 'Mega';
+
+export interface GiftSizeConfig {
+  cols: number;
+  rows: number;
+  name: string;
+  category?: GiftCategoryKey;
+}
+
+export interface GiftThemeConfig {
+  id: string;
+  visualId: number;
+  label: string;
+  description: string;
+  accent: string;
+  glowColor: string;
+  editBg: string;
+  playCoveredBg: string;
+  playRevealedBg: string;
+  ribbonColor: string;
+  sparkleColor: string;
+  iconName: string;
+}
+
+export interface HiddenSafetyReport {
+  totalHidden: number;
+  safeCount: number;
+  unsafeCount: number;
+  byLayer: Record<number, {
+    layer: number;
+    totalTiles: number;
+    hiddenTiles: number;
+    safeTiles: number;
+    unsafeTiles: number;
+    availableIcons: string[];
+    isSelfSufficient: boolean;
+  }>;
+  tileDetails: Array<{
+    tileId: string;
+    x: number;
+    y: number;
+    z: number;
+    state: 'safe' | 'unsafe';
+    sittingLayer: number;
+    layerTileCount: number;
+    isSelfSufficient: boolean;
+    reason: string;
+  }>;
 }

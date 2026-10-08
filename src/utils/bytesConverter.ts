@@ -80,7 +80,7 @@ export const convertGiftToBytes = (gift: any, zToIzMap: Record<number, number>) 
     ix: gift.x,
     iy: gift.y,
     iz: zToIzMap[gift.z],
-    visual: 0,
+    visual: gift.visual ?? 0,
     size: Math.max(cols, rows)
   };
 };

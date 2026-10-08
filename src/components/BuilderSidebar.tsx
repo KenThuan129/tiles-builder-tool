@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Pickaxe, RefreshCw, Shuffle, Square, Trash2, Edit3, Sliders, Layers,
-  Upload, Zap, Boxes, X, Lock, RotateCcw, RotateCw, Gift, Link, Sparkles, MousePointer
+  Upload, Zap, Boxes, X, Lock, RotateCcw, RotateCw, Gift, Link, Sparkles, MousePointer,
+  Gem, Award, Package, Heart, Check, ChevronDown, ChevronUp, Eye, Leaf, Box, Plus, Info
 } from 'lucide-react';
 import {
   Tile, DifficultyMod, ThemeWeights, IconPoolEntry, ThemeIconRegistry,
@@ -10,12 +11,18 @@ import {
   EditorTool, BoardTimerConfig, BoardRandomConfig, BossBattleConfig, SweetDeliveryConfig
 } from '../types/game';
 import {
-  ALL_THEMES, THEME_DOT_COLORS, MECHANICS, GIFT_LAYERS, GIFT_SIZES,
-  DISTRIBUTION_PATTERNS, BOOSTER_PRESETS, BOOSTER_TYPES, COMBINE_SHAPES
+  ALL_THEMES, THEME_DOT_COLORS, MECHANICS, GIFT_LAYERS, GIFT_SIZES, GIFT_THEMES, DEFAULT_GIFT_THEME,
+  DISTRIBUTION_PATTERNS, BOOSTER_PRESETS, BOOSTER_TYPES, COMBINE_SHAPES, ICONS, COLORS,
+  CONVERTIBLE_MECHANICS, applyMechanicToTile
 } from '../constants/gameConfig';
+import { isGiftBlocked, calculateHiddenSafety, calculateAndApplyHiddenSafety } from '../utils/gameHelpers';
 import { IconPoolEditor } from './IconPoolEditor';
 import { ClusterManager } from './ClusterManager';
 import { LicenseData } from '../utils/licenseService';
+import {
+  MorphismScope, MorphismTransformType, MorphismSymmetryType,
+  transformTileList, generateSymmetricTiles, bakeMorphismToTiles
+} from '../utils/morphismHelpers';
 
 interface BuilderSidebarProps {
   mode: 'edit' | 'play';
@@ -27,6 +34,8 @@ interface BuilderSidebarProps {
   setSelectedTool: (tool: EditorTool) => void;
   giftPlacementMode: string | null;
   setGiftPlacementMode: (mode: string | null) => void;
+  activeGiftType?: string;
+  setActiveGiftType?: (type: string) => void;
   activeLayer: number;
   setActiveLayer: (layer: number) => void;
   activeGiftLayer: number;
@@ -62,6 +71,8 @@ interface BuilderSidebarProps {
   setShowOnlyUnbalanced: (show: boolean) => void;
   selectedMechanic: string;
   setSelectedMechanic: (mech: string) => void;
+  hiddenPlacementState?: 'safe' | 'unsafe';
+  setHiddenPlacementState?: (state: 'safe' | 'unsafe') => void;
   selectedCombineShapeId: string;
   setSelectedCombineShapeId: (id: string) => void;
   combineTileCountFilter: number | 'all';
@@ -113,6 +124,9 @@ interface BuilderSidebarProps {
   onRedoEdit?: () => void;
   canUndoEdit?: boolean;
   canRedoEdit?: boolean;
+  // Selection state
+  selectedTileIds?: Set<string>;
+  setSelectedTileIds?: React.Dispatch<React.SetStateAction<Set<string>>>;
 }
 
 const SpectrumAddForm: React.FC<{
@@ -217,6 +231,1034 @@ const SpectrumAddForm: React.FC<{
   );
 };
 
+// --- COMPONENT: SELECT & SPECIAL MECHANIC TRANSFORMER (EXCEPT FOR GIFT) ---
+const SelectMechanicTransformer: React.FC<{
+  tiles: Tile[];
+  setTiles: React.Dispatch<React.SetStateAction<Tile[]>>;
+  selectedTileIds: Set<string>;
+  setSelectedTileIds: React.Dispatch<React.SetStateAction<Set<string>>>;
+  activeLayer: number;
+  onRequirePro: (name: string, desc: string) => void;
+  isPro: boolean;
+}> = ({
+  tiles,
+  setTiles,
+  selectedTileIds,
+  setSelectedTileIds,
+  activeLayer,
+  onRequirePro,
+  isPro,
+}) => {
+  const [sourceMechFilter, setSourceMechFilter] = useState<string>('all');
+  const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
+
+  const selectedTiles = useMemo(() => {
+    return tiles.filter(t => selectedTileIds.has(t.id));
+  }, [tiles, selectedTileIds]);
+
+  const nonGiftSelected = useMemo(() => {
+    return selectedTiles.filter(t => !t.isGift);
+  }, [selectedTiles]);
+
+  const giftSelectedCount = selectedTiles.length - nonGiftSelected.length;
+
+  const mechanicsCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    nonGiftSelected.forEach(t => {
+      const m = t.mechanic || 'normal';
+      counts[m] = (counts[m] || 0) + 1;
+    });
+    return counts;
+  }, [nonGiftSelected]);
+
+  const uniqueMechanics = useMemo(() => Object.keys(mechanicsCounts), [mechanicsCounts]);
+
+  const flashFeedback = (msg: string) => {
+    setFeedbackMsg(msg);
+    setTimeout(() => setFeedbackMsg(null), 3000);
+  };
+
+  const handleConvert = (targetMechId: string, filter: string = 'all') => {
+    if (nonGiftSelected.length === 0) return;
+    let converted = 0;
+    setTiles(prev =>
+      prev.map(t => {
+        if (t.isGift) return t; // strictly exclude gifts
+        if (!selectedTileIds.has(t.id)) return t;
+        const cur = t.mechanic || 'normal';
+        if (filter !== 'all' && cur !== filter) return t;
+        converted++;
+        return applyMechanicToTile(t, targetMechId);
+      })
+    );
+    const targetOpt = CONVERTIBLE_MECHANICS.find(m => m.id === targetMechId);
+    flashFeedback(`✓ Changed ${converted} selected tile${converted > 1 ? 's' : ''} to ${targetOpt?.shortLabel || targetMechId}`);
+  };
+
+  const handleConvertAllInLevel = (sourceMech: string, targetMechId: string) => {
+    let count = 0;
+    setTiles(prev =>
+      prev.map(t => {
+        if (t.isGift) return t;
+        const cur = t.mechanic || 'normal';
+        if (cur !== sourceMech) return t;
+        count++;
+        return applyMechanicToTile(t, targetMechId);
+      })
+    );
+    const targetOpt = CONVERTIBLE_MECHANICS.find(m => m.id === targetMechId);
+    flashFeedback(`✓ Converted all ${count} '${sourceMech}' tiles in level to ${targetOpt?.shortLabel || targetMechId}`);
+  };
+
+  const handleSelectAllOnLayer = () => {
+    const layerTiles = tiles.filter(t => t.z === activeLayer && !t.isGift);
+    setSelectedTileIds(new Set(layerTiles.map(t => t.id)));
+    flashFeedback(`Selected ${layerTiles.length} tiles on Layer ${activeLayer}`);
+  };
+
+  return (
+    <div className="bg-slate-900/90 border border-cyan-500/50 rounded-xl p-3 space-y-3 shadow-xl animate-in fade-in duration-150">
+      <div className="flex items-center justify-between border-b border-slate-700/80 pb-2">
+        <div className="flex items-center gap-1.5">
+          <MousePointer className="w-4 h-4 text-cyan-400" />
+          <span className="text-xs font-black text-cyan-300 uppercase tracking-wide">
+            Select &amp; Change Mechanic
+          </span>
+        </div>
+        <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-black border ${
+          selectedTileIds.size > 0
+            ? 'bg-cyan-950 text-cyan-300 border-cyan-600'
+            : 'bg-slate-800 text-slate-500 border-slate-700'
+        }`}>
+          {selectedTileIds.size} Selected
+        </span>
+      </div>
+
+      {feedbackMsg && (
+        <div className="p-1.5 rounded-lg bg-emerald-950/90 border border-emerald-500 text-emerald-300 text-[10px] font-bold text-center animate-in fade-in">
+          {feedbackMsg}
+        </div>
+      )}
+
+      {selectedTileIds.size === 0 ? (
+        <div className="space-y-2">
+          <p className="text-[10px] text-slate-400 leading-relaxed">
+            Drag marquee on canvas or shift-click tiles to select. You can change <strong>one or a set of same special mechanic tiles</strong> into another mechanic.
+          </p>
+          <div className="grid grid-cols-2 gap-1.5 pt-1">
+            <button
+              onClick={handleSelectAllOnLayer}
+              className="py-1 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 text-[10px] font-bold transition-colors cursor-pointer"
+            >
+              Select All on Layer {activeLayer}
+            </button>
+            <button
+              onClick={() => setSelectedTileIds(new Set(tiles.filter(t => !t.isGift).map(t => t.id)))}
+              className="py-1 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-[10px] font-bold transition-colors cursor-pointer"
+            >
+              Select All Level Tiles
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2.5">
+          {giftSelectedCount > 0 && (
+            <div className="p-1.5 rounded-lg bg-purple-950/60 border border-purple-600/50 text-purple-200 text-[9px] flex items-center justify-between">
+              <span>🎁 {giftSelectedCount} Gift Box{giftSelectedCount > 1 ? 'es' : ''} in selection</span>
+              <span className="text-[8px] bg-purple-900 px-1 rounded font-bold">Gifts Excluded</span>
+            </div>
+          )}
+
+          {nonGiftSelected.length === 0 ? (
+            <div className="p-2 text-center text-[10px] text-slate-400 italic">
+              Only Gift boxes selected. Gifts are excluded from mechanic swapping (manage gifts in the Gift Editor).
+            </div>
+          ) : (
+            <>
+              {/* Mechanic in Selection */}
+              <div>
+                <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 mb-1">
+                  <span>1. Source Mechanic in Selection:</span>
+                  <span className="text-cyan-400 font-mono text-[9px]">
+                    {uniqueMechanics.length === 1 ? 'Uniform Set' : `${uniqueMechanics.length} Mixed`}
+                  </span>
+                </div>
+
+                {uniqueMechanics.length === 1 ? (
+                  <div className="p-2 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between">
+                    <span className="text-[10px] text-slate-300">
+                      All <strong className="text-white">{nonGiftSelected.length}</strong> selected tiles are:
+                    </span>
+                    <span className="text-[10px] font-black text-cyan-300 px-2 py-0.5 rounded bg-cyan-950 border border-cyan-700">
+                      {CONVERTIBLE_MECHANICS.find(m => m.id === uniqueMechanics[0])?.label || uniqueMechanics[0]}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
+                    <button
+                      onClick={() => setSourceMechFilter('all')}
+                      className={`px-2 py-0.5 rounded text-[9px] font-bold transition-colors cursor-pointer ${
+                        sourceMechFilter === 'all'
+                          ? 'bg-cyan-500 text-slate-950 font-black'
+                          : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                      }`}
+                    >
+                      All Selected ({nonGiftSelected.length})
+                    </button>
+                    {uniqueMechanics.map(mKey => {
+                      const count = mechanicsCounts[mKey];
+                      const mOpt = CONVERTIBLE_MECHANICS.find(m => m.id === mKey);
+                      return (
+                        <button
+                          key={mKey}
+                          onClick={() => setSourceMechFilter(mKey)}
+                          className={`px-2 py-0.5 rounded text-[9px] font-bold transition-colors cursor-pointer ${
+                            sourceMechFilter === mKey
+                              ? 'bg-cyan-500 text-slate-950 font-black'
+                              : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                          }`}
+                        >
+                          {mOpt?.shortLabel || mKey} ({count})
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Target Mechanic Picker (strictly excluding Gift) */}
+              <div>
+                <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 mb-1">
+                  <span>2. Change Into Mechanic:</span>
+                  <span className="text-[8px] text-amber-400 font-bold uppercase">(Except Gift)</span>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5 max-h-48 overflow-y-auto pr-0.5">
+                  {CONVERTIBLE_MECHANICS.map(mech => (
+                    <button
+                      key={mech.id}
+                      onClick={() => handleConvert(mech.id, uniqueMechanics.length === 1 ? 'all' : sourceMechFilter)}
+                      className={`p-1.5 rounded-lg border flex items-center gap-1.5 text-left transition-all cursor-pointer active:scale-95 ${mech.colorClass}`}
+                    >
+                      <mech.icon className="w-3.5 h-3.5 shrink-0" />
+                      <div className="truncate min-w-0">
+                        <p className="font-bold text-[10px] truncate leading-tight">{mech.shortLabel}</p>
+                        <p className="text-[8px] opacity-70 truncate leading-none">{mech.description.split(',')[0]}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Level-wide replacement action */}
+              {((uniqueMechanics.length === 1) || (sourceMechFilter !== 'all')) && (
+                <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between">
+                  <span className="text-[9px] text-slate-400">Level-wide:</span>
+                  <button
+                    onClick={() => {
+                      const src = uniqueMechanics.length === 1 ? uniqueMechanics[0] : sourceMechFilter;
+                      const countInLevel = tiles.filter(t => !t.isGift && (t.mechanic || 'normal') === src).length;
+                      const target = prompt(
+                        `Convert all ${countInLevel} '${src}' tiles in entire level into which mechanic? Choose: normal, chained1, chained2, ice2, ice3, hidden, eventItem:`,
+                        'ice2'
+                      );
+                      if (target && CONVERTIBLE_MECHANICS.some(m => m.id === target)) {
+                        handleConvertAllInLevel(src, target);
+                      }
+                    }}
+                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 font-bold text-[9px] flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    <Sparkles className="w-3 h-3 text-cyan-400" />
+                    <span>Convert All in Entire Level</span>
+                  </button>
+                </div>
+              )}
+
+              {/* If Hidden Item tiles are in selection, offer quick Safe/Unsafe calculation & state toggle */}
+              {nonGiftSelected.some(t => t.mechanic === 'hidden') && (
+                <div className="bg-purple-950/70 border border-purple-500/50 p-2 rounded-lg space-y-1.5">
+                  <div className="flex items-center justify-between text-[10px] font-bold text-purple-200">
+                    <span className="flex items-center gap-1">
+                      <Eye className="w-3.5 h-3.5 text-purple-400" />
+                      <span>Hidden Item State (Selected):</span>
+                    </span>
+                    <button
+                      onClick={() => {
+                        const selHidden = nonGiftSelected.filter(t => t.mechanic === 'hidden');
+                        const rep = calculateHiddenSafety(selHidden);
+                        alert(`Selected Hidden Items Analysis:\n• Safe: ${rep.safeCount} (sitting layer confined)\n• Unsafe: ${rep.unsafeCount} (high randomness)`);
+                      }}
+                      className="text-[9px] text-purple-300 hover:text-white underline cursor-pointer"
+                    >
+                      Calculate Safety
+                    </button>
+                  </div>
+                  <div className="flex gap-1.5">
+                    <button
+                      onClick={() => {
+                        setTiles(prev => prev.map(t => {
+                          if (selectedTileIds.has(t.id) && t.mechanic === 'hidden') {
+                            return { ...t, hiddenState: 'safe' };
+                          }
+                          return t;
+                        }));
+                      }}
+                      className="flex-1 py-1 rounded border border-cyan-500/60 bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 font-bold text-[9px] flex items-center justify-center gap-1 cursor-pointer"
+                    >
+                      🛡️ Set Safe (Layer-confined)
+                    </button>
+                    <button
+                      onClick={() => {
+                        setTiles(prev => prev.map(t => {
+                          if (selectedTileIds.has(t.id) && t.mechanic === 'hidden') {
+                            return { ...t, hiddenState: 'unsafe' };
+                          }
+                          return t;
+                        }));
+                      }}
+                      className="flex-1 py-1 rounded border border-amber-500/60 bg-amber-950/80 hover:bg-amber-900 text-amber-300 font-bold text-[9px] flex items-center justify-center gap-1 cursor-pointer"
+                    >
+                      ⚠️ Set Unsafe (Random)
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Clear Selection */}
+              <div className="pt-1 flex justify-end">
+                <button
+                  onClick={() => setSelectedTileIds(new Set())}
+                  className="text-[9px] text-slate-400 hover:text-white underline cursor-pointer"
+                >
+                  Clear Selection (Esc)
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// --- COMPONENT: DEDICATED HIDDEN ITEM (CURTAIN) MANAGER & SAFETY CALCULATOR ---
+const HiddenItemManagerPanel: React.FC<{
+  tiles: Tile[];
+  setTiles: React.Dispatch<React.SetStateAction<Tile[]>>;
+  activeLayer: number;
+  hiddenPlacementState: 'safe' | 'unsafe';
+  setHiddenPlacementState: (state: 'safe' | 'unsafe') => void;
+  isPro: boolean;
+  onRequirePro: (name: string, desc: string) => void;
+}> = ({
+  tiles,
+  setTiles,
+  activeLayer,
+  hiddenPlacementState,
+  setHiddenPlacementState,
+  isPro,
+  onRequirePro
+}) => {
+  const [isDiagnosticOpen, setIsDiagnosticOpen] = useState(true);
+  const [lastCalculationFeedback, setLastCalculationFeedback] = useState<string | null>(null);
+
+  // Live calculated safety report
+  const safetyReport = useMemo(() => calculateHiddenSafety(tiles), [tiles]);
+
+  const handleApplyStateAll = (targetMode: 'all-safe' | 'all-unsafe' | 'auto') => {
+    const updated = calculateAndApplyHiddenSafety(tiles, targetMode);
+    setTiles(updated);
+    const newReport = calculateHiddenSafety(updated);
+    setLastCalculationFeedback(
+      targetMode === 'all-safe'
+        ? `Applied Safe State to ${newReport.totalHidden} hidden tiles. (${newReport.safeCount} valid layer-confined)`
+        : targetMode === 'all-unsafe'
+        ? `Set all ${newReport.totalHidden} hidden tiles to Unsafe mode (higher chance of randomness).`
+        : `Auto-calculated: ${newReport.safeCount} Safe, ${newReport.unsafeCount} Unsafe.`
+    );
+    setTimeout(() => setLastCalculationFeedback(null), 4000);
+  };
+
+  const handleToggleTileState = (tileId: string) => {
+    setTiles(prev => prev.map(t => {
+      if (t.id === tileId) {
+        const nextState = t.hiddenState === 'unsafe' ? 'safe' : 'unsafe';
+        return { ...t, hiddenState: nextState };
+      }
+      return t;
+    }));
+  };
+
+  return (
+    <div className="mt-2 bg-purple-950/80 border border-purple-500/60 p-2.5 rounded-xl text-[10px] space-y-2.5 animate-in fade-in duration-150 shadow-md">
+      {/* Header */}
+      <div className="flex items-center justify-between text-purple-300 font-bold border-b border-purple-800/80 pb-1.5">
+        <div className="flex items-center gap-1.5">
+          <Eye className="w-3.5 h-3.5 text-purple-400" />
+          <span className="text-xs font-bold text-purple-200">Hidden Item Safety</span>
+        </div>
+        <span className="bg-purple-900 border border-purple-500 text-purple-200 px-1.5 py-0.5 rounded font-black text-[9px]">
+          {safetyReport.totalHidden} Hidden ({safetyReport.safeCount} Safe / {safetyReport.unsafeCount} Unsafe)
+        </span>
+      </div>
+
+      {/* 1. Placement State Toggle */}
+      <div>
+        <label className="text-[9px] font-bold text-purple-300 uppercase mb-1 flex items-center justify-between">
+          <span>1. New Placement Hidden State:</span>
+          <span className="text-purple-400 font-mono text-[8px]">Sitting L{activeLayer}</span>
+        </label>
+        <div className="grid grid-cols-2 gap-1.5">
+          <button
+            onClick={() => setHiddenPlacementState('safe')}
+            className={`p-1.5 rounded-lg border flex flex-col items-center gap-0.5 transition-all cursor-pointer ${
+              hiddenPlacementState === 'safe'
+                ? 'bg-cyan-500 text-slate-950 border-cyan-300 font-black shadow-md'
+                : 'bg-slate-900/90 hover:bg-slate-800 border-slate-700 text-slate-300'
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              <span>🛡️</span>
+              <span className="font-bold text-[10px]">Safe State</span>
+            </div>
+            <span className="text-[8px] opacity-80 leading-none">Layer Confined</span>
+          </button>
+
+          <button
+            onClick={() => setHiddenPlacementState('unsafe')}
+            className={`p-1.5 rounded-lg border flex flex-col items-center gap-0.5 transition-all cursor-pointer ${
+              hiddenPlacementState === 'unsafe'
+                ? 'bg-amber-500 text-slate-950 border-amber-300 font-black shadow-md'
+                : 'bg-slate-900/90 hover:bg-slate-800 border-slate-700 text-slate-300'
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              <span>⚠️</span>
+              <span className="font-bold text-[10px]">Unsafe State</span>
+            </div>
+            <span className="text-[8px] opacity-80 leading-none">High Randomness</span>
+          </button>
+        </div>
+
+        <div className="mt-1.5 p-1.5 rounded bg-purple-950/90 border border-purple-800/80 text-[9px] text-purple-200/90 leading-tight">
+          {hiddenPlacementState === 'safe' ? (
+            <p>
+              <strong className="text-cyan-300">🛡️ Safe State:</strong> Spreads available icons strictly on its sitting layer (L{activeLayer}). Other layers cannot be accounted for in the available options for placing icons inside.
+            </p>
+          ) : (
+            <p>
+              <strong className="text-amber-300">⚠️ Unsafe State:</strong> Works as normal with higher chance of randomness drawn from across the board / other layers.
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* 2. Calculation & Diagnostics */}
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <span className="text-[9px] font-bold text-purple-300 uppercase">
+            2. Safety Calculation & Diagnostics:
+          </span>
+          <button
+            onClick={() => setIsDiagnosticOpen(prev => !prev)}
+            className="text-[9px] text-purple-300 hover:text-white underline cursor-pointer"
+          >
+            {isDiagnosticOpen ? 'Collapse' : 'Expand Details'}
+          </button>
+        </div>
+
+        {lastCalculationFeedback && (
+          <div className="p-1.5 rounded bg-emerald-950/80 border border-emerald-500 text-emerald-200 text-[9px] font-semibold animate-in fade-in">
+            ✓ {lastCalculationFeedback}
+          </div>
+        )}
+
+        {/* Quick Batch Actions */}
+        <div className="grid grid-cols-3 gap-1">
+          <button
+            onClick={() => handleApplyStateAll('all-safe')}
+            className="py-1 px-1.5 rounded bg-slate-900 hover:bg-cyan-950 border border-cyan-600/60 text-cyan-300 font-bold text-[9px] transition-colors cursor-pointer text-center"
+            title="Set all hidden tiles to Safe"
+          >
+            🛡️ All Safe
+          </button>
+          <button
+            onClick={() => handleApplyStateAll('all-unsafe')}
+            className="py-1 px-1.5 rounded bg-slate-900 hover:bg-amber-950 border border-amber-600/60 text-amber-300 font-bold text-[9px] transition-colors cursor-pointer text-center"
+            title="Set all hidden tiles to Unsafe"
+          >
+            ⚠️ All Unsafe
+          </button>
+          <button
+            onClick={() => handleApplyStateAll('auto')}
+            className="py-1 px-1.5 rounded bg-slate-900 hover:bg-purple-900 border border-purple-600/60 text-purple-300 font-bold text-[9px] transition-colors cursor-pointer text-center"
+            title="Auto-calculate optimal safety based on layer sufficiency"
+          >
+            🔄 Auto Calc
+          </button>
+        </div>
+
+        {/* Layer-by-layer breakdown */}
+        {isDiagnosticOpen && (
+          <div className="space-y-1.5 bg-slate-950/80 p-2 rounded-lg border border-slate-800">
+            <div className="flex items-center justify-between text-[9px] text-slate-400 font-bold">
+              <span>Sitting Layer Breakdown:</span>
+              <span>{Object.keys(safetyReport.byLayer).length} active layers</span>
+            </div>
+
+            <div className="space-y-1 max-h-36 overflow-y-auto pr-0.5">
+              {Object.values(safetyReport.byLayer).filter(l => l.hiddenTiles > 0).length === 0 ? (
+                <div className="text-[9px] text-slate-500 italic p-1 text-center">
+                  No hidden tiles placed yet in level. Click on grid canvas to place!
+                </div>
+              ) : (
+                Object.values(safetyReport.byLayer)
+                  .filter(l => l.hiddenTiles > 0)
+                  .map(layerStat => (
+                    <div
+                      key={layerStat.layer}
+                      className="p-1.5 rounded bg-slate-900/90 border border-slate-800 text-[9px] flex items-center justify-between gap-1.5"
+                    >
+                      <div>
+                        <div className="flex items-center gap-1.5 font-bold">
+                          <span className="text-purple-300">Layer {layerStat.layer}:</span>
+                          <span className="text-white font-mono">{layerStat.hiddenTiles} hidden</span>
+                          <span className="text-slate-400">({layerStat.totalTiles} total)</span>
+                        </div>
+                        <p className="text-[8px] text-slate-400">
+                          {layerStat.isSelfSufficient
+                            ? `✓ Self-sufficient: Available options confined exclusively to Layer ${layerStat.layer}`
+                            : `⚠️ Warning: Layer has only ${layerStat.totalTiles} tiles (< 3 needed to complete match on sitting layer)`}
+                        </p>
+                      </div>
+
+                      <div className="shrink-0 flex items-center gap-1">
+                        <span className={`px-1.5 py-0.5 rounded font-bold text-[8px] ${
+                          layerStat.unsafeTiles === 0 && layerStat.isSelfSufficient
+                            ? 'bg-cyan-950 text-cyan-300 border border-cyan-600'
+                            : 'bg-amber-950 text-amber-300 border border-amber-600'
+                        }`}>
+                          {layerStat.unsafeTiles === 0 && layerStat.isSelfSufficient ? '🛡️ Safe' : '⚠️ Unsafe'}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+              )}
+            </div>
+
+            {/* Individual Tiles List with Quick Toggles */}
+            {safetyReport.tileDetails.length > 0 && (
+              <div className="pt-1.5 border-t border-slate-800 space-y-1">
+                <span className="text-[9px] font-bold text-slate-400">Individual Tile Safety:</span>
+                <div className="space-y-1 max-h-32 overflow-y-auto pr-0.5">
+                  {safetyReport.tileDetails.map(td => (
+                    <div
+                      key={td.tileId}
+                      className="p-1 rounded bg-slate-900 border border-slate-800/80 flex items-center justify-between text-[8px]"
+                    >
+                      <div className="truncate min-w-0 pr-1">
+                        <span className="font-mono text-purple-300 font-bold">({td.x},{td.y},L{td.z})</span>
+                        <span className="text-slate-400 ml-1 truncate">{td.reason.split(':')[0]}</span>
+                      </div>
+
+                      <button
+                        onClick={() => handleToggleTileState(td.tileId)}
+                        className={`px-1.5 py-0.5 rounded font-black text-[8px] transition-colors cursor-pointer shrink-0 ${
+                          td.state === 'safe'
+                            ? 'bg-cyan-950 text-cyan-300 border border-cyan-600 hover:bg-cyan-900'
+                            : 'bg-amber-950 text-amber-300 border border-amber-600 hover:bg-amber-900'
+                        }`}
+                        title="Click to toggle Safe / Unsafe for this tile"
+                      >
+                        {td.state === 'safe' ? '🛡️ Safe' : '⚠️ Unsafe'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Grid click instructions */}
+      <div className="bg-purple-950/90 p-2 rounded border border-purple-600/50 text-[10px] text-purple-200 font-medium leading-tight flex items-center gap-1.5">
+        <span className="text-amber-300 font-bold shrink-0">👉 Click Grid:</span>
+        <span>
+          Click anywhere on canvas grid to place a {hiddenPlacementState === 'safe' ? 'Safe (Layer-confined)' : 'Unsafe (Random)'} Hidden tile on Layer {activeLayer}.
+        </span>
+      </div>
+    </div>
+  );
+};
+
+// --- COMPONENT: DEDICATED GIFT BOXES EDITOR (ADD & REMOVE GIFTS) ---
+const GiftManagerEditor: React.FC<{
+  tiles: Tile[];
+  setTiles: React.Dispatch<React.SetStateAction<Tile[]>>;
+  activeGiftLayer: number;
+  setActiveGiftLayer: (z: number) => void;
+  giftPlacementMode: string | null;
+  setGiftPlacementMode: (mode: string | null) => void;
+  activeGiftType: string;
+  setActiveGiftType: (type: string) => void;
+  setActiveLayer?: (layer: number) => void;
+  isPro: boolean;
+  onRequirePro: (name: string, desc: string) => void;
+}> = ({
+  tiles,
+  setTiles,
+  activeGiftLayer,
+  setActiveGiftLayer,
+  giftPlacementMode,
+  setGiftPlacementMode,
+  activeGiftType,
+  setActiveGiftType,
+  setActiveLayer,
+  isPro,
+  onRequirePro,
+}) => {
+  const [subTab, setSubTab] = useState<'add' | 'manage'>('add');
+  const [giftCategoryFilter, setGiftCategoryFilter] = useState<string>('all');
+  const [customX, setCustomX] = useState<number>(10);
+  const [customY, setCustomY] = useState<number>(10);
+  const [feedback, setFeedback] = useState<string | null>(null);
+
+  const placedGifts = useMemo(() => {
+    return tiles.filter(t => t.isGift);
+  }, [tiles]);
+
+  const flash = (msg: string) => {
+    setFeedback(msg);
+    setTimeout(() => setFeedback(null), 3000);
+  };
+
+  const handleAddGiftAt = (gx: number, gy: number) => {
+    if (!isPro) {
+      onRequirePro('Gift Boxes', 'Gift boxes are restricted to Pro members.');
+      return;
+    }
+    const sizeKey = giftPlacementMode || 'gift2x2';
+    const size = GIFT_SIZES[sizeKey] || GIFT_SIZES.gift2x2;
+    const snappedX = Math.floor(gx / 2) * 2;
+    const snappedY = Math.floor(gy / 2) * 2;
+    const endX = snappedX + (size.cols - 1) * 2;
+    const endY = snappedY + (size.rows - 1) * 2;
+
+    if (endX > 22 || endY > 22) {
+      alert(`Gift ${size.name} exceeds grid boundaries. Pick a coordinate inside the board.`);
+      return;
+    }
+
+    const giftZ = activeGiftLayer;
+    const themeConfig = GIFT_THEMES[activeGiftType] || GIFT_THEMES.golden;
+
+    const collides = tiles.some(t => {
+      if (!t.isGift || t.z !== giftZ) return false;
+      const tCols = GIFT_SIZES[t.mechanic || '']?.cols || t.giftCols || 2;
+      const tRows = GIFT_SIZES[t.mechanic || '']?.rows || t.giftRows || 2;
+      const tWidth = (tCols - 1) * 2 + 1;
+      const tHeight = (tRows - 1) * 2 + 1;
+      const newWidth = (size.cols - 1) * 2 + 1;
+      const newHeight = (size.rows - 1) * 2 + 1;
+      return !(
+        snappedX + newWidth <= t.x ||
+        snappedX >= t.x + tWidth ||
+        snappedY + newHeight <= t.y ||
+        snappedY >= t.y + tHeight
+      );
+    });
+
+    if (collides) {
+      alert('Another Gift Box already occupies this position on Gift Layer ' + giftZ);
+      return;
+    }
+
+    const newGift: Tile = {
+      id: `gift-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      x: snappedX,
+      y: snappedY,
+      z: giftZ,
+      mechanic: sizeKey,
+      giftCols: size.cols,
+      giftRows: size.rows,
+      giftType: activeGiftType,
+      giftVisual: themeConfig.visualId,
+      isGift: true
+    };
+
+    setTiles(prev => [...prev, newGift]);
+    flash(`✓ Placed ${themeConfig.label} (${size.name}) at (${snappedX}, ${snappedY}) Layer ${giftZ}`);
+  };
+
+  const handlePlaceCenter = () => {
+    handleAddGiftAt(10, 10);
+  };
+
+  const handleRemoveGift = (giftId: string) => {
+    setTiles(prev => prev.filter(t => t.id !== giftId));
+    flash(`✓ Removed Gift Box`);
+  };
+
+  const handleRemoveAllGifts = () => {
+    if (placedGifts.length === 0) return;
+    if (confirm(`Are you sure you want to remove ALL ${placedGifts.length} Gift Boxes in this level?`)) {
+      setTiles(prev => prev.filter(t => !t.isGift));
+      flash(`✓ Removed all ${placedGifts.length} Gift Boxes`);
+    }
+  };
+
+  const handleRemoveGiftsOnLayer = () => {
+    const onLayer = placedGifts.filter(g => g.z === activeGiftLayer);
+    if (onLayer.length === 0) {
+      alert(`No gifts on Gift Layer ${activeGiftLayer}`);
+      return;
+    }
+    setTiles(prev => prev.filter(t => !(t.isGift && t.z === activeGiftLayer)));
+    flash(`✓ Removed ${onLayer.length} gifts on Layer ${activeGiftLayer}`);
+  };
+
+  const handleCycleTheme = (gift: Tile) => {
+    const themesList = Object.keys(GIFT_THEMES);
+    const curIdx = themesList.indexOf(gift.giftType || 'golden');
+    const nextType = themesList[(curIdx + 1) % themesList.length];
+    const themeConfig = GIFT_THEMES[nextType] || GIFT_THEMES.golden;
+    setTiles(prev => prev.map(t => t.id === gift.id ? { ...t, giftType: nextType, giftVisual: themeConfig.visualId } : t));
+    flash(`Changed Gift theme to ${themeConfig.label}`);
+  };
+
+  const handleLocateGift = (gift: Tile) => {
+    setActiveGiftLayer(gift.z);
+    if (setActiveLayer) {
+      setActiveLayer(Math.min(5, Math.ceil(gift.z)));
+    }
+    flash(`Viewing Gift at (${gift.x}, ${gift.y}) on Layer ${gift.z}`);
+  };
+
+  return (
+    <div className="bg-slate-900 border-2 border-purple-500/60 p-3 rounded-xl text-[10px] space-y-3 animate-in fade-in duration-150 shadow-xl">
+      <div className="flex items-center justify-between border-b border-slate-700/80 pb-2">
+        <div className="flex items-center gap-1.5 text-purple-300 font-bold">
+          <Gift className="w-4 h-4 text-amber-400" />
+          <span className="text-xs uppercase tracking-wide">Gift Boxes Editor</span>
+        </div>
+        <span className="text-[9px] font-mono px-2 py-0.5 rounded-full bg-purple-950 border border-purple-700 text-purple-200 font-bold">
+          {placedGifts.length} in Level
+        </span>
+      </div>
+
+      {feedback && (
+        <div className="p-1.5 rounded-lg bg-emerald-950/90 border border-emerald-500 text-emerald-300 text-[10px] font-bold text-center animate-in fade-in">
+          {feedback}
+        </div>
+      )}
+
+      {/* Sub-tabs: Add vs Manage */}
+      <div className="flex bg-slate-950 p-0.5 rounded-lg border border-slate-800">
+        <button
+          onClick={() => setSubTab('add')}
+          className={`flex-1 py-1 rounded text-[10px] font-bold transition-all cursor-pointer flex items-center justify-center gap-1 ${
+            subTab === 'add'
+              ? 'bg-amber-500 text-slate-950 shadow font-black'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <span>➕ Add Gift Box</span>
+        </button>
+        <button
+          onClick={() => setSubTab('manage')}
+          className={`flex-1 py-1 rounded text-[10px] font-bold transition-all cursor-pointer flex items-center justify-center gap-1 ${
+            subTab === 'manage'
+              ? 'bg-purple-600 text-white shadow font-black'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <span>🗑️ Manage / Remove ({placedGifts.length})</span>
+        </button>
+      </div>
+
+      {subTab === 'add' ? (
+        <div className="space-y-3">
+          {/* 1. Theme Picker */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[10px] font-bold text-amber-400 uppercase tracking-wide">
+                1. Theme &amp; Style:
+              </label>
+              <span className="text-[9px] font-mono text-slate-400 font-semibold">
+                {GIFT_THEMES[activeGiftType]?.label || 'Gold Royal'}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              {Object.values(GIFT_THEMES).map(t => {
+                const isSelected = activeGiftType === t.id;
+                const IconComp = t.id === 'mystery' ? Sparkles :
+                                t.id === 'crystal' ? Gem :
+                                t.id === 'ruby' ? Heart :
+                                t.id === 'emerald' ? Award :
+                                t.id === 'chest' ? Package :
+                                t.id === 'tech' ? Zap : Gift;
+                return (
+                  <button
+                    key={t.id}
+                    onClick={() => setActiveGiftType(t.id)}
+                    className={`p-1.5 rounded-lg border flex items-center gap-1.5 text-left transition-all cursor-pointer ${
+                      isSelected
+                        ? 'bg-slate-800 border-white text-white ring-2 ring-amber-400 shadow-md'
+                        : 'bg-slate-950/60 hover:bg-slate-800/60 border-slate-700/70 text-slate-300'
+                    }`}
+                  >
+                    <div
+                      className="w-5 h-5 rounded-md flex items-center justify-center shrink-0 shadow-sm"
+                      style={{ backgroundColor: t.accent }}
+                    >
+                      <IconComp className="w-3.5 h-3.5 text-slate-950 stroke-[2.5]" />
+                    </div>
+                    <div className="truncate min-w-0">
+                      <p className="font-bold truncate text-[10px]">{t.label}</p>
+                      <p className="text-[8px] text-slate-400 truncate">{t.description.split('&')[0]}</p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 2. Dimensions */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[10px] font-bold text-amber-400 uppercase tracking-wide">
+                2. Dimensions:
+              </label>
+              <span className="text-[9px] font-mono text-slate-400">
+                {giftPlacementMode ? GIFT_SIZES[giftPlacementMode]?.name : 'Pick a size'}
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 mb-1.5">
+              {(['all', 'Mini', 'Compact', 'Strip', 'Standard', 'Large', 'Grand', 'Mega'] as const).map(cat => (
+                <button
+                  key={cat}
+                  onClick={() => setGiftCategoryFilter(cat)}
+                  className={`flex-1 min-w-[36px] py-1 px-1 rounded text-[9px] font-bold text-center transition-colors cursor-pointer ${
+                    giftCategoryFilter === cat
+                      ? 'bg-amber-500 text-slate-950 shadow font-black'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                  }`}
+                >
+                  {cat === 'all' ? 'All' : cat}
+                </button>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5 max-h-40 overflow-y-auto pr-0.5">
+              {Object.entries(GIFT_SIZES)
+                .filter(([_, gSize]) => giftCategoryFilter === 'all' || gSize.category === giftCategoryFilter)
+                .map(([id, gSize]) => {
+                  const isSelected = giftPlacementMode === id;
+                  const cellCount = gSize.cols * gSize.rows;
+                  return (
+                    <button
+                      key={id}
+                      onClick={() => setGiftPlacementMode(id)}
+                      className={`p-1.5 rounded-lg border flex flex-col items-center justify-center gap-0.5 text-center transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-amber-500 text-slate-950 font-black border-amber-300 ring-2 ring-amber-400 shadow-md'
+                          : 'bg-slate-950/70 hover:bg-slate-800 border-slate-700/80 text-amber-200'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs font-bold font-mono">{gSize.cols} × {gSize.rows}</span>
+                        <span className={`text-[8px] font-medium px-1 rounded ${isSelected ? 'bg-slate-950/20 text-slate-950' : 'bg-slate-800 text-slate-400'}`}>
+                          {gSize.category}
+                        </span>
+                      </div>
+                      <span className={`text-[9px] font-mono ${isSelected ? 'text-slate-900 font-bold' : 'text-slate-400'}`}>
+                        {cellCount} {cellCount === 1 ? 'cell' : 'cells'}
+                      </span>
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+
+          {/* 3. Gift Layer */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[10px] font-bold text-amber-400 uppercase tracking-wide">
+                3. Gift Layer:
+              </label>
+              <span className="text-[9px] font-mono text-amber-300 font-bold">
+                Layer {activeGiftLayer}
+              </span>
+            </div>
+            <div className="flex gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
+              {GIFT_LAYERS.map(z => (
+                <button
+                  key={z}
+                  onClick={() => setActiveGiftLayer(z)}
+                  className={`flex-1 py-1 rounded text-[10px] font-bold transition-colors cursor-pointer ${
+                    activeGiftLayer === z
+                      ? 'bg-amber-500 text-slate-950 font-black'
+                      : 'text-amber-300/70 hover:bg-slate-800 hover:text-white'
+                  }`}
+                >
+                  {z}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 4. Placement Buttons */}
+          <div className="space-y-1.5 pt-1 border-t border-slate-800">
+            <button
+              onClick={handlePlaceCenter}
+              className="w-full py-2 px-3 rounded-lg bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black text-xs shadow-md flex items-center justify-center gap-1.5 cursor-pointer transition-transform active:scale-98"
+            >
+              <Sparkles className="w-4 h-4 text-slate-950" />
+              <span>⚡ Place at Center (10, 10)</span>
+            </button>
+
+            <div className="flex items-center gap-1.5 text-[10px]">
+              <span className="text-slate-400 font-medium">Or at (X, Y):</span>
+              <input
+                type="number"
+                min="0"
+                max="20"
+                step="2"
+                value={customX}
+                onChange={e => setCustomX(parseInt(e.target.value) || 0)}
+                className="w-12 bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-center text-white font-mono text-xs"
+              />
+              <span className="text-slate-500">,</span>
+              <input
+                type="number"
+                min="0"
+                max="20"
+                step="2"
+                value={customY}
+                onChange={e => setCustomY(parseInt(e.target.value) || 0)}
+                className="w-12 bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-center text-white font-mono text-xs"
+              />
+              <button
+                onClick={() => handleAddGiftAt(customX, customY)}
+                className="flex-1 py-1 px-2 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 font-bold transition-colors cursor-pointer"
+              >
+                Place
+              </button>
+            </div>
+
+            <div className="bg-amber-950/60 p-2 rounded-lg border border-amber-600/50 text-[10px] text-amber-200 font-medium flex items-center gap-2">
+              <span className="text-amber-400 font-bold shrink-0 text-sm">👉</span>
+              <span>Click anywhere on grid canvas to place configured Gift Box on Layer {activeGiftLayer}.</span>
+            </div>
+          </div>
+        </div>
+      ) : (
+        /* MANAGE / REMOVE GIFTS SUB-TAB */
+        <div className="space-y-2.5">
+          {placedGifts.length === 0 ? (
+            <div className="p-4 text-center space-y-2 rounded-xl bg-slate-950 border border-slate-800">
+              <Gift className="w-8 h-8 text-slate-600 mx-auto" />
+              <p className="text-xs text-slate-400 font-medium">No Gift Boxes in this level yet.</p>
+              <button
+                onClick={() => setSubTab('add')}
+                className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-black text-xs cursor-pointer shadow"
+              >
+                ➕ Add a Gift Box
+              </button>
+            </div>
+          ) : (
+            <>
+              {/* Batch Removal Controls */}
+              <div className="flex gap-1.5">
+                <button
+                  onClick={handleRemoveAllGifts}
+                  className="flex-1 py-1.5 px-2 bg-red-950/80 hover:bg-red-900 border border-red-700 text-red-200 rounded-lg font-bold text-[10px] flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Remove All ({placedGifts.length})</span>
+                </button>
+                <button
+                  onClick={handleRemoveGiftsOnLayer}
+                  className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 rounded-lg font-bold text-[10px] cursor-pointer transition-colors"
+                >
+                  Clear Layer {activeGiftLayer}
+                </button>
+              </div>
+
+              {/* List of placed gifts */}
+              <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
+                {placedGifts.map((gift, idx) => {
+                  const size = GIFT_SIZES[gift.mechanic || ''] || { cols: gift.giftCols || 2, rows: gift.giftRows || 2, name: `Gift ${gift.giftCols || 2}×${gift.giftRows || 2}` };
+                  const themeKey = gift.giftType || 'golden';
+                  const theme = GIFT_THEMES[themeKey] || GIFT_THEMES.golden;
+                  const isCovered = isGiftBlocked(gift, tiles);
+
+                  return (
+                    <div
+                      key={gift.id || idx}
+                      className="p-2 rounded-lg bg-slate-950/90 border border-slate-800 hover:border-slate-700 flex items-center justify-between gap-2 transition-all shadow-sm"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div
+                          className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 shadow"
+                          style={{ backgroundColor: theme.accent }}
+                        >
+                          <Gift className="w-4 h-4 text-slate-950 stroke-[2.5]" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-black text-slate-200 truncate text-[10px]">{theme.label}</span>
+                            <span className="text-[9px] font-mono px-1 rounded bg-slate-800 text-amber-300 font-bold shrink-0">
+                              {size.cols}×{size.rows}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-[8px] text-slate-400 font-mono">
+                            <span>({gift.x}, {gift.y})</span>
+                            <span>•</span>
+                            <span>L{gift.z}</span>
+                            <span>•</span>
+                            <span className={isCovered ? 'text-amber-400 font-bold' : 'text-emerald-400 font-bold'}>
+                              {isCovered ? '🔒 Covered' : '🔓 Free'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          onClick={() => handleLocateGift(gift)}
+                          title="Locate &amp; view this gift on canvas"
+                          className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white cursor-pointer"
+                        >
+                          🔍
+                        </button>
+                        <button
+                          onClick={() => handleCycleTheme(gift)}
+                          title="Change style/theme"
+                          className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 hover:text-white cursor-pointer"
+                        >
+                          🎨
+                        </button>
+                        <button
+                          onClick={() => handleRemoveGift(gift.id)}
+                          title="Remove this gift box from level"
+                          className="p-1 rounded bg-red-950 hover:bg-red-800 text-red-300 hover:text-white cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
   mode,
   isOpenMobile,
@@ -227,6 +1269,8 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
   setSelectedTool,
   giftPlacementMode,
   setGiftPlacementMode,
+  activeGiftType: externalGiftType,
+  setActiveGiftType: externalSetGiftType,
   activeLayer,
   setActiveLayer,
   activeGiftLayer,
@@ -262,6 +1306,8 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
   setShowOnlyUnbalanced,
   selectedMechanic,
   setSelectedMechanic,
+  hiddenPlacementState,
+  setHiddenPlacementState,
   selectedCombineShapeId,
   setSelectedCombineShapeId,
   combineTileCountFilter,
@@ -310,10 +1356,64 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
   onRedoEdit,
   canUndoEdit = false,
   canRedoEdit = false,
+  selectedTileIds: externalSelectedTileIds,
+  setSelectedTileIds: externalSetSelectedTileIds,
 }) => {
   const matchableCount = tiles.filter(t => !t.isGift).length;
   const isPlayable = matchableCount > 0 && matchableCount % 3 === 0;
   const isPro = !!activeLicense;
+
+  const [internalSelectedTileIds, setInternalSelectedTileIds] = useState<Set<string>>(new Set());
+  const selectedTileIds = externalSelectedTileIds ?? internalSelectedTileIds;
+  const setSelectedTileIds = externalSetSelectedTileIds ?? setInternalSelectedTileIds;
+
+  const [internalGiftType, setInternalGiftType] = useState<string>(DEFAULT_GIFT_THEME);
+  const [giftCategoryFilter, setGiftCategoryFilter] = useState<string>('all');
+  const activeGiftType = externalGiftType ?? internalGiftType;
+  const setActiveGiftType = externalSetGiftType ?? setInternalGiftType;
+
+  // Board Morphism & Level Design Tools State
+  const [morphismScope, setMorphismScope] = useState<MorphismScope>('all');
+  const [morphismFeedback, setMorphismFeedback] = useState<string | null>(null);
+
+  const handleApplyMorphismTransform = (type: MorphismTransformType) => {
+    setTiles(prev => {
+      const next = transformTileList(prev, type, morphismScope, activeLayer);
+      return next;
+    });
+    const label = type === 'rotate90cw' ? 'Rotated 90° CW' :
+      type === 'rotate90ccw' ? 'Rotated 90° CCW' :
+      type === 'rotate180' ? 'Rotated 180°' :
+      type === 'flipH' ? 'Flipped Horizontal' : 'Flipped Vertical';
+    setMorphismFeedback(`✓ ${label} (${morphismScope === 'all' ? 'All Tiles' : `Layer ${activeLayer}`})`);
+    setTimeout(() => setMorphismFeedback(null), 3000);
+  };
+
+  const handleApplyMorphismSymmetry = (type: MorphismSymmetryType) => {
+    setTiles(prev => {
+      const { newTiles, addedCount } = generateSymmetricTiles(prev, type, morphismScope, activeLayer);
+      const symLabel = type === 'radial4' ? '4-Way Radial Symmetry' :
+        type === 'rotational2' ? '2-Way Rotational Symmetry' :
+        type === 'mirrorH' ? 'Horizontal Mirror' : 'Vertical Mirror';
+      setMorphismFeedback(`✓ Generated ${symLabel} (+${addedCount} cloned tiles)!`);
+      setTimeout(() => setMorphismFeedback(null), 3500);
+      return newTiles;
+    });
+  };
+
+  const handleBakeMorphism = () => {
+    setTiles(prev => {
+      const baked = bakeMorphismToTiles(prev, boardMorphism.spinAngle, boardMorphism.mirroredHorizons);
+      return baked;
+    });
+    setBoardMorphism(prev => ({
+      ...prev,
+      spinAngle: 0,
+      mirroredHorizons: false,
+    }));
+    setMorphismFeedback(`✨ Permanently baked morphism into all map tiles!`);
+    setTimeout(() => setMorphismFeedback(null), 3500);
+  };
 
   const handleSuggestClick = () => {
     if (!isPro) {
@@ -419,6 +1519,7 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
               >
                 <RotateCw className="w-3.5 h-3.5" />
               </button>
+              {/*
               <button
                 onClick={handleRandomClick}
                 title="Generate New Random Layout (Pro)"
@@ -435,6 +1536,7 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
                 {!isPro && <Lock className="w-3 h-3 text-amber-400" />}
                 <Shuffle className="w-3 h-3" /> Suggest Level
               </button>
+              */}
             </div>
           </div>
 
@@ -483,7 +1585,7 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
             <button
               onClick={() => setSelectedTool('place')}
               title="Place Tile Tool (P)"
-              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md font-medium text-xs transition-colors cursor-pointer ${
+              className={`flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md font-medium text-xs transition-colors cursor-pointer ${
                 selectedTool === 'place'
                   ? 'bg-amber-500 text-slate-950 font-bold shadow'
                   : 'text-slate-400 hover:text-white hover:bg-slate-800'
@@ -492,9 +1594,9 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
               <Square className="w-3.5 h-3.5 shrink-0" /> Place
             </button>
             <button
-              onClick={() => setSelectedTool('erase')}
+              onClick={() => { setSelectedTool('erase'); setGiftPlacementMode(null); }}
               title="Erase Tile Tool (E)"
-              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md font-medium text-xs transition-colors cursor-pointer ${
+              className={`flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md font-medium text-xs transition-colors cursor-pointer ${
                 selectedTool === 'erase'
                   ? 'bg-red-500 text-white font-bold shadow'
                   : 'text-slate-400 hover:text-white hover:bg-slate-800'
@@ -503,9 +1605,9 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
               <Trash2 className="w-3.5 h-3.5 shrink-0" /> Erase
             </button>
             <button
-              onClick={() => setSelectedTool('select')}
-              title="Marquee Selection Tool: Drag to select tiles on active layer (S/V)"
-              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md font-medium text-xs transition-colors cursor-pointer ${
+              onClick={() => { setSelectedTool('select'); setGiftPlacementMode(null); }}
+              title="Select Tool: Transform Special Mechanic tiles (except Gift), rotate, move (S/V)"
+              className={`flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md font-medium text-xs transition-colors cursor-pointer ${
                 selectedTool === 'select'
                   ? 'bg-cyan-500 text-slate-950 font-bold shadow'
                   : 'text-slate-400 hover:text-white hover:bg-slate-800'
@@ -513,10 +1615,60 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
             >
               <MousePointer className="w-3.5 h-3.5 shrink-0" /> Select
             </button>
+            <button
+              onClick={() => { setSelectedTool('gift'); setGiftPlacementMode(giftPlacementMode || 'gift2x2'); }}
+              title="Gift Boxes Editor: Add / remove gift boxes in the level"
+              className={`flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md font-medium text-xs transition-colors cursor-pointer ${
+                selectedTool === 'gift'
+                  ? 'bg-purple-600 text-white font-bold shadow ring-1 ring-purple-300'
+                  : 'text-purple-300 hover:text-white hover:bg-purple-950/60'
+              }`}
+            >
+              <Gift className="w-3.5 h-3.5 shrink-0 text-amber-300" /> Gifts
+            </button>
           </div>
+
+          {/* Active Tool Sub-Panels (Select Mechanic Transformer & Dedicated Gift Editor) */}
+          {selectedTool === 'select' && (
+            <div className="mb-3">
+              <SelectMechanicTransformer
+                tiles={tiles}
+                setTiles={setTiles}
+                selectedTileIds={selectedTileIds}
+                setSelectedTileIds={setSelectedTileIds}
+                activeLayer={activeLayer}
+                isPro={isPro}
+                onRequirePro={onRequirePro}
+              />
+            </div>
+          )}
+
+          {selectedTool === 'gift' && (
+            <div className="mb-3">
+              <GiftManagerEditor
+                tiles={tiles}
+                setTiles={setTiles}
+                activeGiftLayer={activeGiftLayer}
+                setActiveGiftLayer={setActiveGiftLayer}
+                giftPlacementMode={giftPlacementMode}
+                setGiftPlacementMode={setGiftPlacementMode}
+                activeGiftType={activeGiftType}
+                setActiveGiftType={setActiveGiftType}
+                setActiveLayer={setActiveLayer}
+                isPro={isPro}
+                onRequirePro={onRequirePro}
+              />
+            </div>
+          )}
         </div>
 
         <div className="space-y-3.5 pr-0.5 pb-6">
+          <button
+            onClick={() => setTiles([])}
+            className="w-full mt-1 py-1.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-950/40 rounded border border-red-900/50 transition-colors font-medium cursor-pointer"
+          >
+            Clear Board
+          </button>
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label className="text-[11px] font-bold text-slate-400 uppercase mb-1 block">Level Target</label>
@@ -1019,10 +2171,12 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
                         return;
                       }
                       if (mech.id === 'gift') {
+                        setSelectedTool('gift');
                         setSelectedMechanic('gift');
                         setGiftPlacementMode(giftPlacementMode && giftPlacementMode in GIFT_SIZES ? giftPlacementMode : 'gift2x2');
                       } else {
                         setSelectedMechanic(mech.id);
+                        if (selectedTool === 'gift') setSelectedTool('place');
                         setGiftPlacementMode(null);
                       }
                     }}
@@ -1045,56 +2199,20 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
             </div>
 
             {selectedMechanic === 'gift' && (
-              <div className="mt-2 bg-amber-950/80 border border-amber-500/60 p-2.5 rounded-lg text-[10px] space-y-2.5 animate-in fade-in duration-150">
-                <div className="flex items-center justify-between text-amber-300 font-bold border-b border-amber-700/60 pb-1">
-                  <span className="flex items-center gap-1">
-                    <Gift className="w-3.5 h-3.5 text-amber-400" />
-                    Gift Box Size Selector
-                  </span>
-                  <span className="bg-amber-900 border border-amber-400 text-amber-200 px-1.5 py-0.5 rounded font-black text-[9px]">
-                    Layer {activeGiftLayer}
-                  </span>
-                </div>
-
-                <div>
-                  <label className="text-[9px] font-bold text-amber-400 uppercase mb-1 block">
-                    Select Gift Box Dimensions:
-                  </label>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {[
-                      { id: 'gift2x2', label: '2 × 2', desc: '4 Grid Cells' },
-                      { id: 'gift2x3', label: '2 × 3', desc: '6 Grid Cells' },
-                      { id: 'gift3x3', label: '3 × 3', desc: '9 Grid Cells' },
-                      { id: 'gift4x4', label: '4 × 4', desc: '16 Grid Cells' },
-                    ].map(gSize => {
-                      const isSelected = giftPlacementMode === gSize.id;
-                      return (
-                        <button
-                          key={gSize.id}
-                          onClick={() => {
-                            setGiftPlacementMode(gSize.id);
-                            setSelectedMechanic('gift');
-                          }}
-                          className={`p-2 rounded-md border flex flex-col items-center justify-center gap-0.5 text-center transition-all cursor-pointer ${
-                            isSelected
-                              ? 'bg-amber-500 text-slate-950 font-black border-amber-300 ring-2 ring-amber-400 shadow-md scale-102'
-                              : 'bg-amber-950/40 hover:bg-amber-900/60 border-amber-700/60 text-amber-200 font-bold'
-                          }`}
-                        >
-                          <span className="text-xs">{gSize.label}</span>
-                          <span className={`text-[9px] font-mono ${isSelected ? 'text-slate-900 font-bold' : 'text-amber-400/80'}`}>
-                            {gSize.desc}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="bg-amber-950/90 p-2 rounded border border-amber-600/50 text-[10px] text-amber-200 font-medium leading-tight flex items-center gap-1.5">
-                  <span className="text-yellow-300 font-bold shrink-0">👉 Click Grid:</span>
-                  <span>Click anywhere on grid canvas to place this {GIFT_SIZES[giftPlacementMode || 'gift2x2']?.name || 'Gift'}.</span>
-                </div>
+              <div className="mt-2">
+                <GiftManagerEditor
+                  tiles={tiles}
+                  setTiles={setTiles}
+                  activeGiftLayer={activeGiftLayer}
+                  setActiveGiftLayer={setActiveGiftLayer}
+                  giftPlacementMode={giftPlacementMode}
+                  setGiftPlacementMode={setGiftPlacementMode}
+                  activeGiftType={activeGiftType}
+                  setActiveGiftType={setActiveGiftType}
+                  setActiveLayer={setActiveLayer}
+                  isPro={isPro}
+                  onRequirePro={onRequirePro}
+                />
               </div>
             )}
 
@@ -1251,6 +2369,18 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
                 </div>
               </div>
             )}
+
+            {selectedMechanic === 'hidden' && (
+              <HiddenItemManagerPanel
+                tiles={tiles}
+                setTiles={setTiles}
+                activeLayer={activeLayer}
+                hiddenPlacementState={hiddenPlacementState || 'safe'}
+                setHiddenPlacementState={setHiddenPlacementState || (() => {})}
+                isPro={isPro}
+                onRequirePro={onRequirePro}
+              />
+            )}
           </div>
 
           {/* Board Mechanisms Section */}
@@ -1265,8 +2395,8 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
               </span>
             </div>
 
-            {/* 1. Board-morphism */}
-            <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800 space-y-2">
+            {/* 1. Board-morphism & Level Design Rotation Tools */}
+            <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800 space-y-2.5">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-bold text-slate-200 flex items-center gap-1.5 cursor-pointer">
                   <input
@@ -1282,18 +2412,173 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
                 </span>
               </div>
 
-              {boardMorphism.enabled && (
-                <div className="space-y-2 pt-1 border-t border-slate-800/80 text-[10px] animate-in fade-in duration-150">
-                  {/* Spin the board */}
-                  <div>
-                    <div className="flex justify-between text-slate-300 font-bold mb-1">
-                      <span>Spin the Board Angle:</span>
+              {/* Fast Level Design: Map Transformation Tools */}
+              <div className="space-y-2 pt-1 border-t border-slate-800/80 text-[10px]">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-purple-300 flex items-center gap-1">
+                    <Sparkles className="w-3 h-3 text-amber-400" />
+                    <span>Fast Map Rotation & Symmetry</span>
+                  </span>
+                </div>
+
+                {/* Scope selector */}
+                <div className="flex items-center gap-1 bg-slate-900 p-1 rounded border border-slate-800">
+                  <span className="text-[9px] text-slate-400 px-1 font-semibold">Scope:</span>
+                  {(['all', 'layer'] as MorphismScope[]).map(sc => (
+                    <button
+                      key={sc}
+                      type="button"
+                      onClick={() => setMorphismScope(sc)}
+                      className={`flex-1 py-0.5 px-1.5 rounded text-[9px] font-bold transition-colors cursor-pointer ${
+                        morphismScope === sc
+                          ? 'bg-purple-600 text-white shadow-xs'
+                          : 'bg-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {sc === 'all' ? `All (${tiles.length})` : `Layer ${activeLayer}`}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Quick Map Rotations & Flips */}
+                <div>
+                  <span className="text-[9px] text-slate-400 block mb-1">Rotate / Flip Map Tiles:</span>
+                  <div className="grid grid-cols-5 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => handleApplyMorphismTransform('rotate90cw')}
+                      title="Rotate 90° Clockwise"
+                      className="py-1 px-0.5 bg-slate-900 hover:bg-purple-950/80 border border-slate-800 hover:border-purple-600 text-slate-300 hover:text-purple-200 rounded font-bold text-[9px] flex flex-col items-center gap-0.5 transition-colors cursor-pointer"
+                    >
+                      <RotateCw className="w-3.5 h-3.5 text-purple-400" />
+                      <span>90° CW</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyMorphismTransform('rotate90ccw')}
+                      title="Rotate 90° Counter-Clockwise"
+                      className="py-1 px-0.5 bg-slate-900 hover:bg-purple-950/80 border border-slate-800 hover:border-purple-600 text-slate-300 hover:text-purple-200 rounded font-bold text-[9px] flex flex-col items-center gap-0.5 transition-colors cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-purple-400" />
+                      <span>90° CCW</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyMorphismTransform('rotate180')}
+                      title="Rotate 180°"
+                      className="py-1 px-0.5 bg-slate-900 hover:bg-purple-950/80 border border-slate-800 hover:border-purple-600 text-slate-300 hover:text-purple-200 rounded font-bold text-[9px] flex flex-col items-center gap-0.5 transition-colors cursor-pointer"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5 text-purple-400" />
+                      <span>180°</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyMorphismTransform('flipH')}
+                      title="Flip Horizontal (Mirror X)"
+                      className="py-1 px-0.5 bg-slate-900 hover:bg-purple-950/80 border border-slate-800 hover:border-purple-600 text-slate-300 hover:text-purple-200 rounded font-bold text-[9px] flex flex-col items-center gap-0.5 transition-colors cursor-pointer"
+                    >
+                      <span className="text-xs font-bold leading-none">↔</span>
+                      <span>Flip H</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyMorphismTransform('flipV')}
+                      title="Flip Vertical (Mirror Y)"
+                      className="py-1 px-0.5 bg-slate-900 hover:bg-purple-950/80 border border-slate-800 hover:border-purple-600 text-slate-300 hover:text-purple-200 rounded font-bold text-[9px] flex flex-col items-center gap-0.5 transition-colors cursor-pointer"
+                    >
+                      <span className="text-xs font-bold leading-none">↕</span>
+                      <span>Flip V</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Instant Symmetry Generators */}
+                <div className="bg-slate-900/90 p-2 rounded-lg border border-purple-900/50 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-amber-300 text-[9px] flex items-center gap-1">
+                      <span>🌸 Rotational Symmetry Generator:</span>
+                    </span>
+                    <span className="text-[8px] text-slate-500">1-Click Layout</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleApplyMorphismSymmetry('radial4')}
+                      title="Duplicate existing tiles to all 4 quadrants (90°, 180°, 270° clones) for instant radial symmetry"
+                      className="p-1.5 bg-purple-950/60 hover:bg-purple-900/90 border border-purple-500/50 hover:border-purple-400 text-purple-200 rounded-lg text-left transition-all cursor-pointer group"
+                    >
+                      <div className="font-black text-[9px] flex items-center gap-1 text-purple-100 group-hover:text-white">
+                        <span>🌸 4-Way Radial</span>
+                      </div>
+                      <span className="text-[8px] text-purple-300/80 block leading-tight mt-0.5">
+                        Clone 90°, 180°, 270° to make 4 quadrants
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleApplyMorphismSymmetry('rotational2')}
+                      title="Duplicate existing tiles rotated 180° for balanced 2-way rotational symmetry"
+                      className="p-1.5 bg-cyan-950/60 hover:bg-cyan-900/90 border border-cyan-500/50 hover:border-cyan-400 text-cyan-200 rounded-lg text-left transition-all cursor-pointer group"
+                    >
+                      <div className="font-black text-[9px] flex items-center gap-1 text-cyan-100 group-hover:text-white">
+                        <span>☯️ 2-Way Symmetry</span>
+                      </div>
+                      <span className="text-[8px] text-cyan-300/80 block leading-tight mt-0.5">
+                        Clone 180° for balanced 2-side layout
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleApplyMorphismSymmetry('mirrorH')}
+                      title="Mirror clone tiles horizontally across center"
+                      className="p-1.5 bg-slate-950/70 hover:bg-slate-800 border border-slate-700/80 text-slate-200 rounded-lg text-left transition-all cursor-pointer col-span-1"
+                    >
+                      <div className="font-bold text-[9px] flex items-center gap-1 text-slate-200">
+                        <span>🪞 Mirror Clone (H)</span>
+                      </div>
+                      <span className="text-[8px] text-slate-400 block leading-tight mt-0.5">
+                        Horizontal reflection copy
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleApplyMorphismSymmetry('mirrorV')}
+                      title="Mirror clone tiles vertically across center"
+                      className="p-1.5 bg-slate-950/70 hover:bg-slate-800 border border-slate-700/80 text-slate-200 rounded-lg text-left transition-all cursor-pointer col-span-1"
+                    >
+                      <div className="font-bold text-[9px] flex items-center gap-1 text-slate-200">
+                        <span>🪞 Mirror Clone (V)</span>
+                      </div>
+                      <span className="text-[8px] text-slate-400 block leading-tight mt-0.5">
+                        Vertical reflection copy
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Feedback badge */}
+                {morphismFeedback && (
+                  <div className="bg-emerald-950/90 border border-emerald-500/70 text-emerald-300 p-1.5 rounded-lg text-center text-[9px] font-bold animate-in fade-in duration-150 shadow-xs">
+                    {morphismFeedback}
+                  </div>
+                )}
+
+                {/* Live Preview & In-Game Gimmick Settings */}
+                {boardMorphism.enabled && (
+                  <div className="space-y-2 pt-2 border-t border-slate-800">
+                    <div className="flex justify-between items-center text-slate-300 font-bold">
+                      <span>Live Board Spin:</span>
                       <span className="text-purple-300 font-mono">{boardMorphism.spinAngle}°</span>
                     </div>
-                    <div className="flex gap-1 mb-1.5">
+
+                    <div className="flex gap-1">
                       {[0, 90, 180, 270].map(angle => (
                         <button
                           key={angle}
+                          type="button"
                           onClick={() => setBoardMorphism(prev => ({ ...prev, spinAngle: angle }))}
                           className={`flex-1 py-1 rounded font-bold border transition-colors cursor-pointer ${
                             boardMorphism.spinAngle === angle
@@ -1305,6 +2590,7 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
                         </button>
                       ))}
                     </div>
+
                     <input
                       type="range"
                       min="0"
@@ -1314,20 +2600,43 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
                       onChange={(e) => setBoardMorphism(prev => ({ ...prev, spinAngle: parseInt(e.target.value) || 0 }))}
                       className="w-full accent-purple-500 cursor-pointer"
                     />
-                  </div>
 
-                  {/* Mirrored The Horizons */}
-                  <label className="flex items-center gap-2 p-1.5 rounded bg-slate-900 border border-slate-800 cursor-pointer hover:bg-slate-800/60">
-                    <input
-                      type="checkbox"
-                      checked={boardMorphism.mirroredHorizons}
-                      onChange={(e) => setBoardMorphism(prev => ({ ...prev, mirroredHorizons: e.target.checked }))}
-                      className="rounded border-slate-700 text-purple-500 focus:ring-purple-400 cursor-pointer"
-                    />
-                    <span className="font-bold text-purple-200">Mirrored The Horizons (Horizontal Flip)</span>
-                  </label>
-                </div>
-              )}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-0.5">
+                      <label className="flex items-center gap-1.5 p-1.5 rounded bg-slate-900 border border-slate-800 cursor-pointer hover:bg-slate-800/60">
+                        <input
+                          type="checkbox"
+                          checked={boardMorphism.mirroredHorizons}
+                          onChange={(e) => setBoardMorphism(prev => ({ ...prev, mirroredHorizons: e.target.checked }))}
+                          className="rounded border-slate-700 text-purple-500 focus:ring-purple-400 cursor-pointer"
+                        />
+                        <span className="font-bold text-purple-200 text-[9px]">Mirrored Horizons</span>
+                      </label>
+
+                      <label className="flex items-center gap-1.5 p-1.5 rounded bg-slate-900 border border-slate-800 cursor-pointer hover:bg-slate-800/60">
+                        <input
+                          type="checkbox"
+                          checked={!!boardMorphism.previewInEditor}
+                          onChange={(e) => setBoardMorphism(prev => ({ ...prev, previewInEditor: e.target.checked }))}
+                          className="rounded border-slate-700 text-cyan-500 focus:ring-cyan-400 cursor-pointer"
+                        />
+                        <span className="font-bold text-cyan-200 text-[9px]">Preview in Editor</span>
+                      </label>
+                    </div>
+
+                    {/* Bake Morphism into Map Button */}
+                    {(boardMorphism.spinAngle !== 0 || boardMorphism.mirroredHorizons) && (
+                      <button
+                        type="button"
+                        onClick={handleBakeMorphism}
+                        className="w-full py-1.5 px-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg font-black text-[9px] shadow-md border border-purple-400/50 flex items-center justify-center gap-1.5 cursor-pointer transition-all active:scale-98"
+                      >
+                        <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                        <span>Bake Morphism into Map (Permanently Apply)</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* 2. Tiles-spectrum */}
@@ -1485,11 +2794,10 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
                   <input
                     type="checkbox"
                     checked={bossBattle.enabled}
-                    disabled={sweetDelivery.enabled}
                     onChange={(e) => setBossBattle(prev => ({ ...prev, enabled: e.target.checked }))}
-                    className="rounded border-slate-700 text-purple-500 focus:ring-purple-400 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="rounded border-slate-700 text-purple-500 focus:ring-purple-400 cursor-pointer"
                   />
-                  <span className={sweetDelivery.enabled ? 'text-slate-500 line-through' : ''}>BOSS Battle</span>
+                  <span>BOSS Battle</span>
                 </label>
                 <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${bossBattle.enabled ? 'bg-purple-900 text-purple-200 border border-purple-600' : 'bg-slate-800 text-slate-500'}`}>
                   {bossBattle.enabled ? 'Active' : 'Off'}
@@ -1511,9 +2819,20 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
                     />
                   </div>
                   <ul className="text-[9px] text-purple-400 space-y-1 list-disc pl-3">
-                    <li>Tray max size reduced by 2 (max 5 slots).</li>
-                    <li>Each matched triplet inflicts damage (depletes Boss HP).</li>
-                    <li>Full tray returns 3 tiles to grid, triggers shuffle, and costs -25% Player HP instead of a Game Over.</li>
+                    <li>Tray max size reduced by 2 (max 5 slots, or 4 slots in Endless Order).</li>
+                    {sweetDelivery.enabled ? (
+                      <li className="text-amber-300 font-semibold">
+                        ⚡ Sweet Delivery Synergy: Completing an order inflicts direct damage to Boss HP (regular matches do not damage Boss)!
+                      </li>
+                    ) : (
+                      <li>Each matched triplet inflicts damage (depletes Boss HP).</li>
+                    )}
+                    {sweetDelivery.enabled && (
+                      <li className="text-cyan-300 font-semibold">
+                        🌀 Boss Scramble: Boss periodically reshuffles and scrambles the order of all orders!
+                      </li>
+                    )}
+                    <li>Full tray overflow triggers recovery shuffle and costs -25% Player HP.</li>
                   </ul>
                 </div>
               )}
@@ -1526,26 +2845,227 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
                   <input
                     type="checkbox"
                     checked={sweetDelivery.enabled}
-                    disabled={bossBattle.enabled}
                     onChange={(e) => setSweetDelivery(prev => ({ ...prev, enabled: e.target.checked }))}
-                    className="rounded border-slate-700 text-purple-500 focus:ring-purple-400 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="rounded border-slate-700 text-purple-500 focus:ring-purple-400 cursor-pointer"
                   />
-                  <span className={bossBattle.enabled ? 'text-slate-500 line-through' : ''}>Sweet Delivery</span>
+                  <span>Sweet Delivery</span>
                 </label>
                 <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${sweetDelivery.enabled ? 'bg-purple-900 text-purple-200 border border-purple-600' : 'bg-slate-800 text-slate-500'}`}>
                   {sweetDelivery.enabled ? 'Active' : 'Off'}
                 </span>
               </div>
 
-              {sweetDelivery.enabled && (
-                <div className="space-y-1 pt-1 border-t border-slate-800/80 text-[10px] animate-in fade-in duration-150">
-                  <ul className="text-[9px] text-purple-400 space-y-1 list-disc pl-3">
-                    <li>Tray max size reduced by 2 (max 5 slots).</li>
-                    <li>Displays 4 active orders (lists of 3 identical tiles required).</li>
-                    <li>Complete all 4 orders to win the game!</li>
-                  </ul>
-                </div>
-              )}
+              {sweetDelivery.enabled && (() => {
+                const matchableTiles = (tiles || []).filter(t => !t.isGift && t.baseIcon);
+                const totalTilesCount = matchableTiles.length;
+                // Max allowed formula: [(total tiles count / 3) - 2]
+                const maxOrdersAllowed = Math.max(1, Math.floor(totalTilesCount / 3) - 2);
+                const currentMaxOrders = Math.min(
+                  maxOrdersAllowed,
+                  Math.max(1, sweetDelivery.maxOrders !== undefined ? sweetDelivery.maxOrders : Math.min(4, maxOrdersAllowed))
+                );
+
+                // Group unique icon + color pairs in the current level
+                const levelColorIconBreakdown = (() => {
+                  const map = new Map<string, { icon: string; color: string; count: number }>();
+                  (tiles || []).forEach(t => {
+                    if (t.isGift || !t.baseIcon) return;
+                    const color = t.color || 'yellow';
+                    const key = `${t.baseIcon}__${color}`;
+                    const curr = map.get(key);
+                    if (curr) {
+                      curr.count++;
+                    } else {
+                      map.set(key, { icon: t.baseIcon, color, count: 1 });
+                    }
+                  });
+                  return Array.from(map.values()).sort((a, b) => b.count - a.count);
+                })();
+
+                return (
+                  <div className="space-y-2.5 pt-1 border-t border-slate-800/80 text-[10px] animate-in fade-in duration-150">
+                    {/* Option 1: Color based Delivery */}
+                    <div className="p-2 rounded bg-slate-900 border border-slate-800 space-y-2">
+                      <label className="flex items-start gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!!sweetDelivery.colorBased}
+                          onChange={(e) => setSweetDelivery(prev => ({ ...prev, colorBased: e.target.checked }))}
+                          className="rounded border-slate-700 text-purple-500 focus:ring-purple-400 cursor-pointer mt-0.5"
+                        />
+                        <div className="flex-1">
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-slate-200">Option 1: Color-based Delivery</span>
+                            <span className={`text-[8px] font-bold px-1 rounded ${sweetDelivery.colorBased ? 'bg-amber-950 text-amber-300 border border-amber-600/40' : 'text-slate-500'}`}>
+                              {sweetDelivery.colorBased ? 'On' : 'Off'}
+                            </span>
+                          </div>
+                          <p className="text-[9px] text-slate-400 leading-tight mt-0.5">
+                            Only tiles with the <strong>same icon AND same color</strong> satisfy the delivery order. Same icon with different color cannot fulfill it.
+                          </p>
+                        </div>
+                      </label>
+
+                      {/* Max Orders adjustment: up to [(total tiles count / 3) - 2] */}
+                      <div className="bg-slate-950/80 p-2 rounded border border-purple-500/30 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-purple-300 text-[10px]">Max Delivery Orders</span>
+                          <span className="font-mono font-bold text-amber-300 bg-slate-900 px-1.5 py-0.5 rounded border border-slate-700 text-[10px]">
+                            {currentMaxOrders} / {maxOrdersAllowed} max
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="range"
+                            min={1}
+                            max={maxOrdersAllowed}
+                            value={currentMaxOrders}
+                            onChange={(e) => {
+                              const val = Math.min(maxOrdersAllowed, Math.max(1, parseInt(e.target.value) || 1));
+                              setSweetDelivery(prev => ({ ...prev, maxOrders: val }));
+                            }}
+                            className="flex-1 accent-purple-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+                          />
+                          <input
+                            type="number"
+                            min={1}
+                            max={maxOrdersAllowed}
+                            value={currentMaxOrders}
+                            onChange={(e) => {
+                              const val = Math.min(maxOrdersAllowed, Math.max(1, parseInt(e.target.value) || 1));
+                              setSweetDelivery(prev => ({ ...prev, maxOrders: val }));
+                            }}
+                            className="w-10 bg-slate-900 border border-slate-700 rounded text-center text-amber-300 font-mono font-bold text-[10px] py-0.5 outline-none"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between text-[8px] text-slate-400">
+                          <span>Formula: [({totalTilesCount} tiles / 3) - 2] = <strong>{maxOrdersAllowed}</strong> max orders allowed</span>
+                          <div className="flex gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setSweetDelivery(prev => ({ ...prev, maxOrders: 1 }))}
+                              className="px-1 py-0.2 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 cursor-pointer"
+                            >
+                              Min
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSweetDelivery(prev => ({ ...prev, maxOrders: Math.min(4, maxOrdersAllowed) }))}
+                              className="px-1 py-0.2 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 cursor-pointer"
+                            >
+                              Std (4)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSweetDelivery(prev => ({ ...prev, maxOrders: maxOrdersAllowed }))}
+                              className="px-1 py-0.2 bg-purple-900/60 hover:bg-purple-800 rounded text-purple-200 cursor-pointer font-bold"
+                            >
+                              Max
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Level Color-Tile & Corresponding Icon Showcase */}
+                      <div className="bg-slate-950/80 p-2 rounded border border-slate-800 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-slate-300 text-[9px] flex items-center gap-1">
+                            <span>🎨</span> Level Tile Showcase ({levelColorIconBreakdown.length} unique types)
+                          </span>
+                          <span className="text-[8px] text-purple-400 font-mono">
+                            {sweetDelivery.colorBased ? 'Exact Color Req.' : 'Standard Match'}
+                          </span>
+                        </div>
+
+                        {levelColorIconBreakdown.length === 0 ? (
+                          <p className="text-[9px] text-slate-500 italic">No tiles placed on board yet.</p>
+                        ) : (
+                          <div className="grid grid-cols-2 gap-1.5 max-h-36 overflow-y-auto pr-1">
+                            {levelColorIconBreakdown.map((item, idx) => {
+                              const colorObj = COLORS.find(c => c.id === item.color);
+                              const IconComp = ICONS[item.icon] || Gift;
+                              const isEligibleOrder = item.count >= 3;
+
+                              return (
+                                <div
+                                  key={idx}
+                                  className={`p-1.5 rounded-lg border flex items-center gap-1.5 transition-all ${
+                                    isEligibleOrder ? 'bg-slate-900/90 border-slate-700/80' : 'bg-slate-950/60 border-slate-800 opacity-60'
+                                  }`}
+                                  title={`${item.icon} in ${item.color}: ${item.count} tiles on board (${Math.floor(item.count / 3)} triplets)`}
+                                >
+                                  {/* Detailed color tile preview */}
+                                  <div className={`w-7 h-7 rounded-md border flex items-center justify-center shrink-0 shadow-xs relative ${colorObj?.bg || 'bg-slate-800'} ${colorObj?.border || 'border-slate-700'}`}>
+                                    <IconComp className={`w-4 h-4 ${colorObj?.class || 'text-white'}`} />
+                                    <span className="absolute -bottom-1 -right-1 text-[7px] font-mono font-bold bg-slate-950 text-amber-300 px-0.5 rounded border border-slate-800">
+                                      x{item.count}
+                                    </span>
+                                  </div>
+
+                                  <div className="flex-1 min-w-0">
+                                    <div className="text-[9px] font-bold text-slate-200 truncate leading-tight">
+                                      {item.icon}
+                                    </div>
+                                    <div className="flex items-center gap-1 mt-0.5">
+                                      <span className={`text-[7px] font-mono uppercase px-1 py-0.2 rounded font-bold ${colorObj ? colorObj.class : 'text-slate-400'} bg-slate-950 border border-slate-800`}>
+                                        {item.color}
+                                      </span>
+                                      {isEligibleOrder ? (
+                                        <span className="text-[7px] text-emerald-400 font-bold">✓ Ready</span>
+                                      ) : (
+                                        <span className="text-[7px] text-amber-500 font-bold">&lt;3</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Option 2: Endless Order */}
+                    <label className="flex items-start gap-2 p-1.5 rounded bg-slate-900 border border-slate-800 cursor-pointer hover:bg-slate-850">
+                      <input
+                        type="checkbox"
+                        checked={!!sweetDelivery.endlessOrder}
+                        onChange={(e) => setSweetDelivery(prev => ({ ...prev, endlessOrder: e.target.checked }))}
+                        className="rounded border-slate-700 text-purple-500 focus:ring-purple-400 cursor-pointer mt-0.5"
+                      />
+                      <div className="flex-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-slate-200">Option 2: Endless Order</span>
+                          <span className={`text-[8px] font-bold px-1 rounded ${sweetDelivery.endlessOrder ? 'bg-cyan-950 text-cyan-300 border border-cyan-600/40' : 'text-slate-500'}`}>
+                            {sweetDelivery.endlessOrder ? '4 Slots' : 'Off'}
+                          </span>
+                        </div>
+                        <p className="text-[9px] text-slate-400 leading-tight mt-0.5">
+                          Main tray reduced to <strong>4 slots</strong>. Sub-trays ONLY accept tiles matching <strong>both color + icon</strong>. Mismatches return to main tray until suitable order activates. 4 orders appear (2 active, 2 queued). Clear all board tiles to win!
+                        </p>
+                      </div>
+                    </label>
+
+                    {bossBattle.enabled && (
+                      <div className="bg-purple-950/70 p-2 rounded border border-purple-500/40 text-[9px] text-purple-200 space-y-1">
+                        <span className="font-bold text-amber-300 flex items-center gap-1">
+                          ⚔️ Boss + Sweet Delivery Combined
+                        </span>
+                        <p className="text-slate-300">
+                          Fulfilling an order deals 25 damage to Boss HP (regular matches do not damage Boss). Boss can scramble active and queued orders!
+                        </p>
+                      </div>
+                    )}
+
+                    <ul className="text-[9px] text-purple-400 space-y-1 list-disc pl-3">
+                      <li>Tray capacity: {sweetDelivery.endlessOrder ? '4 max slots' : '5 max slots'}.</li>
+                      <li>{sweetDelivery.endlessOrder ? 'Deadlock on main tray (4 slots full) results in loss.' : 'Complete all orders to win!'}</li>
+                    </ul>
+                  </div>
+                );
+              })()}
             </div>
           </div>
 
@@ -1594,14 +3114,6 @@ export const BuilderSidebar: React.FC<BuilderSidebarProps> = ({
               </div>
             )}
           </div>
-
-          <button
-            onClick={() => setTiles([])}
-            className="w-full mt-1 py-1.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-950/40 rounded border border-red-900/50 transition-colors font-medium cursor-pointer"
-          >
-            Clear Board
-          </button>
-
           <p className="text-[10px] text-slate-500 text-center leading-relaxed">
             Changing theme weights? Click <span className="text-cyan-300 font-bold">Redistribute</span> to apply without regenerating the layout.
           </p>

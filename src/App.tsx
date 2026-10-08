@@ -4,11 +4,11 @@ import {
   IconPoolEntry, ThemeIconRegistry, BoosterAvailability, SuggestParams,
   ValidatedImportData, ImportWarning, TileCluster, BotPersona, MoveLogItem, MoveSequencePayload,
   BoardMorphismConfig, TileSpectrumEntry, EditorTool,
-  BoardTimerConfig, BoardRandomConfig, BossBattleConfig, SweetDeliveryConfig
+  BoardTimerConfig, BoardRandomConfig, BossBattleConfig, SweetDeliveryConfig, DeliveryOrderItem
 } from './types/game';
 import {
   VIEWPORT_PRESETS, INTRINSIC_BOARD_SIZE, WEIGHTS, ICONS, COLORS,
-  ALL_THEMES, GIFT_SIZES, INITIAL_DIFFICULTY_MODS, DISTRIBUTION_PATTERNS,
+  ALL_THEMES, GIFT_SIZES, GIFT_THEMES, DEFAULT_GIFT_THEME, INITIAL_DIFFICULTY_MODS, DISTRIBUTION_PATTERNS,
   COMBINE_SHAPES, BOOSTER_TYPES, BOOSTER_PRESETS, BOOSTER_CAPS,
   BOOSTER_MEDIANS, BYTES_VERSION
 } from './constants/gameConfig';
@@ -18,11 +18,14 @@ import {
   buildStackDepthMap, assignIconsBudgetAware, buildIconAssignmentPlan,
   assignIconsFromPool, checkComboBalance, isGiftBlocked, resolveSpecialMechanics,
   formTripletGroups, buildThemeQueue, countInitialMatches, findMagnetTargets,
-  shuffleIcons, findLastIndex
+  shuffleIcons, findLastIndex, generateDeliveryOrdersFromBoard, transferMatchingTilesToSubTrays,
+  generateLevelProgressionOrders, calculateHiddenSafety, calculateAndApplyHiddenSafety,
+  distributeIconsWithHiddenSafety
 } from './utils/gameHelpers';
 import { convertToBytes } from './utils/bytesConverter';
 import { loadLicenseFromStorage, LicenseData } from './utils/licenseService';
 import { getBotNextMove } from './utils/botSimulator';
+import { buildProceduralLevel } from './utils/suggestLevelHelpers';
 
 import { Header } from './components/Header';
 import { BuilderSidebar } from './components/BuilderSidebar';
@@ -230,10 +233,13 @@ export default function App() {
   );
   const [layerViewMode, setLayerViewMode] = useState<'all' | 'cumulative' | 'isolated'>('all');
   const [selectedTool, setSelectedTool] = useState<EditorTool>('place');
+  const [selectedTileIds, setSelectedTileIds] = useState<Set<string>>(new Set());
   const [difficultyMods, setDifficultyMods] = useState<Record<string, DifficultyMod>>(INITIAL_DIFFICULTY_MODS);
   const [difficultyMod, setDifficultyMod] = useState<string>('modMedium');
   const [isModEditorOpen, setIsModEditorOpen] = useState<boolean>(false);
   const [giftPlacementMode, setGiftPlacementMode] = useState<string | null>(null);
+  const [activeGiftType, setActiveGiftType] = useState<string>(DEFAULT_GIFT_THEME);
+  const [hiddenPlacementState, setHiddenPlacementState] = useState<'safe' | 'unsafe'>('safe');
   const [eventItemsCollected, setEventItemsCollected] = useState<number>(0);
   const [giftsRevealed, setGiftsRevealed] = useState<number>(0);
 
@@ -284,14 +290,18 @@ export default function App() {
     layers: 3,
     stackRatio: 30,
     diagonalRatio: 30,
-    layoutShape: 'pyramid',
+    layoutShape: 'tapTile_mandala',
     hiddenPct: 10,
     chained1Pct: 5,
     chained2Pct: 5,
     icePct: 10,
     combinedPct: 5,
     combinedMaxSize: 4,
-    enableeventItemLeaf: true
+    enableeventItemLeaf: true,
+    layer0SampleOnly: false,
+    hiddenSafetyMode: 'safe',
+    levelRangePreset: '11-30',
+    difficultyBand: 'modMedium'
   });
 
   const [distributionPattern, setDistributionPattern] = useState<string>('themeFocus');
@@ -330,8 +340,13 @@ export default function App() {
 
   const [sweetDelivery, setSweetDelivery] = useState<SweetDeliveryConfig>({
     enabled: false,
+    colorBased: false,
+    endlessOrder: false,
     orders: [], // Will be generated when starting the play mode
+    orderItems: []
   });
+  const [deliveryOrderItems, setDeliveryOrderItems] = useState<DeliveryOrderItem[]>([]);
+  const [bossScrambleMovesCount, setBossScrambleMovesCount] = useState<number>(0);
 
   // Dynamic Board Mechanism Play States
   const [timeLeft, setTimeLeft] = useState<number>(60);
@@ -341,6 +356,7 @@ export default function App() {
   const [hasRevivedThisRun, setHasRevivedThisRun] = useState<boolean>(false);
   const [matchCountSinceLastShuffle, setMatchCountSinceLastShuffle] = useState<number>(0);
   const [hasPickedFirstTile, setHasPickedFirstTile] = useState<boolean>(false);
+  const [notificationMsg, setNotificationMsg] = useState<string | null>(null);
 
   const [playTiles, setPlayTiles] = useState<Tile[]>([]);
   const [container, setContainer] = useState<Tile[]>([]);
@@ -420,236 +436,70 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const tryPlaceCombineCluster = (anchorX: number, anchorY: number, layerTilesSoFar: Tile[], maxSize: number, remainingSlots: number) => {
-    const candidates = COMBINE_SHAPES
-      .filter(s => s.size <= maxSize && s.size <= remainingSlots)
-      .sort(() => Math.random() - 0.5);
-
-    for (const shape of candidates) {
-      const cells = shape.offsets.map(o => ({ x: anchorX + o.dx, y: anchorY + o.dy }));
-      const valid = cells.every(c =>
-        c.x >= 2 && c.x <= 20 && c.y >= 2 && c.y <= 20 &&
-        !layerTilesSoFar.some(t => t.x === c.x && t.y === c.y)
-      );
-      if (valid) return cells;
-    }
-    return null;
-  };
-
   const executeSuggestLevel = (params: SuggestParams) => {
-    const generatedTiles: Tile[] = [];
-    let id = 0;
+    // 1. Generate high-quality layout using Top Game Archetypes & strict parameter constraints
+    const { tiles: generatedTiles, layersCount } = buildProceduralLevel(params, activeThemes);
 
-    const numLayers = Math.min(Math.max(Number(params.layers) || 3, 2), 5);
-    const targetCount = Math.min(Math.max(Number(params.targetTiles) || 30, 9), 150);
-    const adjustedTarget = Math.floor(targetCount / 3) * 3;
-    const stackRatioVal = Number(params.stackRatio) || 30;
-    const diagonalRatioVal = Number(params.diagonalRatio) || 30;
-    const shape = params.layoutShape || 'pyramid';
-    const combinedMaxSize = Math.min(Math.max(Number(params.combinedMaxSize) || 4, 2), 5);
-
-    const perLayerCount = Math.ceil(adjustedTarget / numLayers);
-
-    for (let z = 0; z < numLayers; z++) {
-      const layerTiles: Tile[] = [];
-      let placedThisLayer = 0;
-      const targetForThisLayer = (z === numLayers - 1)
-        ? (adjustedTarget - generatedTiles.length)
-        : Math.min(perLayerCount, adjustedTarget - generatedTiles.length);
-
-      if (targetForThisLayer <= 0) break;
-
-      const candidateCoords: Array<{ x: number; y: number }> = [];
-      let seedX = 10, seedY = 10;
-
-      if (shape === 'pyramid') {
-        const margin = z * 2;
-        seedX = 10; seedY = 10;
-        const start = 2 + margin;
-        const end = 20 - margin;
-        for (let y = start; y <= end; y += 2) {
-          for (let x = start; x <= end; x += 2) {
-            candidateCoords.push({ x, y });
-          }
-        }
-      } else if (shape === 'clusterCluster') {
-        const centers = [
-          { cx: 6 + z, cy: 6 }, { cx: 14 - z, cy: 6 },
-          { cx: 10, cy: 12 + (z % 2) }, { cx: 6, cy: 15 }
-        ];
-        const chosenCenter = centers[z % centers.length];
-        seedX = chosenCenter.cx; seedY = chosenCenter.cy;
-        centers.forEach(c => {
-          for (let dx = -3; dx <= 3; dx += 2) {
-            for (let dy = -3; dy <= 3; dy += 2) {
-              const nx = Math.max(2, Math.min(20, c.cx + dx));
-              const ny = Math.max(2, Math.min(20, c.cy + dy));
-              candidateCoords.push({ x: nx, y: ny });
-            }
-          }
-        });
-      } else if (shape === 'spiralWave') {
-        seedX = 6 + (z * 2); seedY = 10;
-        for (let i = 0; i < 24; i++) {
-          const x = 3 + (i * 1.5) % 15;
-          const y = Math.floor(5 + Math.sin(i * 0.8 + z) * 5 + 5);
-          const snappedX = Math.round(x / 2) * 2;
-          const snappedY = Math.round(y / 2) * 2;
-          candidateCoords.push({ x: Math.max(2, Math.min(20, snappedX)), y: Math.max(2, Math.min(20, snappedY)) });
-        }
-      } else {
-        seedX = z % 2 === 0 ? 6 : 14; seedY = 10;
-        for (let y = 4; y <= 18; y += 2) {
-          for (let x = 2; x <= 20; x += 2) {
-            if (Math.abs(x - 10) > 2 + z) candidateCoords.push({ x, y });
-          }
-        }
-      }
-
-      const coordKey = (x: number, y: number) => `${x},${y}`;
-      const candidateSet = new Set(candidateCoords.map(c => coordKey(c.x, c.y)));
-
-      const seed = candidateCoords.reduce((closest, current) => {
-        const distClosest = Math.abs(closest.x - seedX) + Math.abs(closest.y - seedY);
-        const distCurrent = Math.abs(current.x - seedX) + Math.abs(current.y - seedY);
-        return distCurrent < distClosest ? current : closest;
-      }, candidateCoords[0] || { x: 10, y: 10 });
-
-      const chosen = [seed];
-      const chosenKeys = new Set([coordKey(seed.x, seed.y)]);
-      const frontier = [seed];
-
-      const GROW_OFFSETS = [
-        { dx: 2, dy: 0 }, { dx: -2, dy: 0 }, { dx: 0, dy: 2 }, { dx: 0, dy: -2 },
-        { dx: 2, dy: 2 }, { dx: -2, dy: -2 }, { dx: 2, dy: -2 }, { dx: -2, dy: 2 },
-        { dx: 4, dy: 0 }, { dx: -4, dy: 0 }, { dx: 0, dy: 4 }, { dx: 0, dy: -4 }
-      ];
-
-      while (chosen.length < targetForThisLayer && frontier.length > 0) {
-        const idx = Math.floor(Math.random() * frontier.length);
-        const current = frontier.splice(idx, 1)[0];
-        const shuffledOffsets = [...GROW_OFFSETS].sort(() => Math.random() - 0.5);
-
-        for (const offset of shuffledOffsets) {
-          if (chosen.length >= targetForThisLayer) break;
-          const nx = current.x + offset.dx;
-          const ny = current.y + offset.dy;
-          if (nx >= 2 && nx <= 20 && ny >= 2 && ny <= 20) {
-            const key = coordKey(nx, ny);
-            if (candidateSet.has(key) && !chosenKeys.has(key)) {
-              chosen.push({ x: nx, y: ny });
-              chosenKeys.add(key);
-              frontier.push({ x: nx, y: ny });
-            }
-          }
-        }
-      }
-
-      if (chosen.length < targetForThisLayer) {
-        const remaining = candidateCoords
-          .filter(c => !chosenKeys.has(coordKey(c.x, c.y)))
-          .sort(() => Math.random() - 0.5);
-        for (const c of remaining) {
-          if (chosen.length >= targetForThisLayer) break;
-          chosen.push(c);
-          chosenKeys.add(coordKey(c.x, c.y));
-        }
-      }
-
-      for (let i = 0; i < chosen.length && placedThisLayer < targetForThisLayer; i++) {
-        const coord = chosen[i];
-        if (layerTiles.some(t => t.x === coord.x && t.y === coord.y)) continue;
-
-        let posX = coord.x;
-        let posY = coord.y;
-
-        if (z > 0 && generatedTiles.filter(t => t.z === z - 1).length > 0) {
-          const lowerLayerTiles = generatedTiles.filter(t => t.z === z - 1);
-          const baseTile = lowerLayerTiles[Math.floor(Math.random() * lowerLayerTiles.length)];
-
-          const rollCover = Math.random() * 100;
-          if (rollCover < stackRatioVal) {
-            posX = baseTile.x;
-            posY = baseTile.y;
-          } else if (rollCover < stackRatioVal + diagonalRatioVal) {
-            const offsets = [{ dx: 1, dy: 1 }, { dx: -1, dy: -1 }, { dx: 1, dy: -1 }, { dx: -1, dy: 1 }, { dx: 1, dy: 0 }, { dx: 0, dy: 1 }];
-            const offset = offsets[Math.floor(Math.random() * offsets.length)];
-            posX = Math.max(2, Math.min(20, baseTile.x + offset.dx));
-            posY = Math.max(2, Math.min(20, baseTile.y + offset.dy));
-          }
-        }
-
-        let mech = 'normal';
-        let clusterCells: Array<{ x: number; y: number }> | null = null;
-        const rollMech = Math.random() * 100;
-        const pHidden = Number(params.hiddenPct) || 0;
-        const pChained1 = Number(params.chained1Pct) || 0;
-        const pChained2 = Number(params.chained2Pct) || 0;
-        const pIce = Number(params.icePct) || 0;
-        const pCombined = Number(params.combinedPct) || 0;
-
-        if (z > 0 && rollMech < pHidden) {
-          mech = 'hidden';
-        } else if (rollMech < pHidden + pChained1) {
-          mech = 'chained1';
-        } else if (rollMech < pHidden + pChained1 + pChained2) {
-          mech = 'chained2';
-        } else if (rollMech < pHidden + pChained1 + pChained2 + pIce) {
-          mech = Math.random() > 0.5 ? 'ice2' : 'ice3';
-        } else if (rollMech < pHidden + pChained1 + pChained2 + pIce + pCombined) {
-          const remainingSlots = targetForThisLayer - placedThisLayer;
-          clusterCells = tryPlaceCombineCluster(posX, posY, layerTiles, combinedMaxSize, remainingSlots);
-          mech = clusterCells ? 'combined' : 'normal';
-        }
-
-        if (clusterCells) {
-          clusterCells.forEach(cell => {
-            layerTiles.push({ id: `gen-${id++}`, x: cell.x, y: cell.y, z, mechanic: 'combined' });
-            placedThisLayer++;
-          });
-        } else {
-          layerTiles.push({ id: `gen-${id++}`, x: posX, y: posY, z, mechanic: mech });
-          placedThisLayer++;
-        }
-      }
-
-      generatedTiles.push(...layerTiles);
+    // 2. Set Active Layer appropriately (Layer 0 if layer 0 sample only)
+    if (params.layer0SampleOnly) {
+      setActiveLayer(0);
+    } else if (activeLayer >= layersCount) {
+      setActiveLayer(0);
     }
 
-    let remainder = generatedTiles.length % 3;
-    if (remainder !== 0) {
-      for (let i = generatedTiles.length - 1; i >= 0 && remainder > 0; i--) {
-        generatedTiles.splice(i, 1);
-        remainder--;
-      }
-    }
-
-    if (params.enableeventItemLeaf) {
-      const normalTiles = generatedTiles.filter(t => t.mechanic === 'normal');
-      if (normalTiles.length >= 3) {
-        const shuffled = [...normalTiles].sort(() => Math.random() - 0.5);
-        for (let i = 0; i < 3; i++) {
-          const target = generatedTiles.find(t => t.id === shuffled[i].id);
-          if (target) {
-            target.mechanic = 'eventItem';
-            target.movesRemaining = 4;
-          }
-        }
-      }
-    }
-
-    const completeTriplets = formTripletGroups(generatedTiles);
+    // 3. Apply Triplet Theme Mapping
+    const matchableTiles = generatedTiles.filter(t => !t.isGift);
+    const completeTriplets = formTripletGroups(matchableTiles);
     const themeQueue = buildThemeQueue(themeWeights, completeTriplets);
 
     const groupThemeMap = new Map<string, string>();
     generatedTiles.forEach(t => {
+      if (t.isGift) return;
       if (!t.tripletGroupId) return;
       if (!groupThemeMap.has(t.tripletGroupId)) {
         const idx = groupThemeMap.size;
-        groupThemeMap.set(t.tripletGroupId, themeQueue[idx] || activeThemes[0]);
+        groupThemeMap.set(t.tripletGroupId, themeQueue[idx] || activeThemes[0] || 'theme00');
       }
       t.themeID = groupThemeMap.get(t.tripletGroupId);
     });
+
+    // 4. Update Difficulty Mod Band if specified
+    if (params.difficultyBand && difficultyMods[params.difficultyBand]) {
+      setDifficultyMod(params.difficultyBand);
+    }
+
+    // 5. Apply Board Mechanics (Timer, Boss, Sweet Delivery, Morphism)
+    if (params.boardTimerEnabled !== undefined) {
+      setBoardTimer({
+        enabled: !!params.boardTimerEnabled,
+        duration: params.boardTimerDuration || 90
+      });
+    }
+
+    if (params.bossBattleEnabled !== undefined) {
+      setBossBattle({
+        enabled: !!params.bossBattleEnabled,
+        maxHP: params.bossBattleHP || 80
+      });
+    }
+
+    if (params.sweetDeliveryEnabled !== undefined) {
+      setSweetDelivery(prev => ({
+        ...prev,
+        enabled: !!params.sweetDeliveryEnabled,
+        maxOrders: params.sweetDeliveryOrdersCount || 6,
+        endlessOrder: !!params.sweetDeliveryEndless
+      }));
+    }
+
+    if (params.boardMorphismEnabled !== undefined) {
+      setBoardMorphism(prev => ({
+        ...prev,
+        enabled: !!params.boardMorphismEnabled,
+        spinAngle: params.boardMorphismSymmetry === 'rot90' ? 90 : prev.spinAngle,
+        mirroredHorizons: params.boardMorphismSymmetry === 'horizontal' || params.boardMorphismSymmetry === 'quad'
+      }));
+    }
 
     setTiles(generatedTiles);
     setIsSuggestModalOpen(false);
@@ -679,28 +529,19 @@ export default function App() {
     const shuffledVariants = [...allPossible].sort(() => Math.random() - 0.5);
     const pool = shuffledVariants.slice(0, Math.min(modConfig.variants, shuffledVariants.length));
 
-    const triplets: Array<{ i: string; c: string }> = [];
-    const numSets = totalMatchable / 3;
-    for (let i = 0; i < numSets; i++) {
-      const v = pool[Math.floor(Math.random() * pool.length)];
-      triplets.push(v, v, v);
-    }
-    triplets.sort(() => Math.random() - 0.5);
+    // Distribute icons respecting Safe vs Unsafe Hidden Item mechanics:
+    // Safe State spreads available icons on its sitting layer (other layers cannot be accounted for).
+    // Unsafe State works as normal with higher chance of randomness.
+    const { tiles: distributedTiles } = distributeIconsWithHiddenSafety(resolvedTiles, pool, allPossible);
 
-    let tIndex = 0;
-    const initializedPlayTiles = resolvedTiles.map(t => {
-      const assigned = triplets[tIndex++];
-      return {
-        ...t,
-        baseIcon: assigned.i,
-        color: assigned.c,
-        iceMatchesRemaining: t.mechanic === 'ice3' ? 3 : t.mechanic === 'ice2' ? 2 : undefined,
-        chainClearedCount: t.mechanic === 'chained1' || t.mechanic === 'chained2' ? 0 : undefined,
-        isRevealed: t.mechanic !== 'hidden',
-        movesRemaining: t.mechanic === 'eventItem' ? 4 : undefined,
-        isEventItemActive: t.mechanic === 'eventItem'
-      };
-    });
+    const initializedPlayTiles = distributedTiles.map(t => ({
+      ...t,
+      iceMatchesRemaining: t.mechanic === 'ice3' ? 3 : t.mechanic === 'ice2' ? 2 : undefined,
+      chainClearedCount: t.mechanic === 'chained1' || t.mechanic === 'chained2' ? 0 : undefined,
+      isRevealed: t.mechanic !== 'hidden',
+      movesRemaining: t.mechanic === 'eventItem' ? 4 : undefined,
+      isEventItemActive: t.mechanic === 'eventItem'
+    }));
 
     const giftTiles = tiles.filter(t => t.isGift).map(g => ({
       ...g,
@@ -726,19 +567,116 @@ export default function App() {
     setHasRevivedThisRun(false);
     setMatchCountSinceLastShuffle(0);
     setHasPickedFirstTile(false);
+    setBossScrambleMovesCount(0);
 
     if (sweetDelivery.enabled) {
-      const activeIcons = Array.from(new Set(initializedPlayTiles.map(t => t.baseIcon).filter(Boolean))) as string[];
-      const shuffled = [...activeIcons].sort(() => Math.random() - 0.5);
-      const deliveryOrders = shuffled.slice(0, 4);
-      while (deliveryOrders.length < 4) {
-        deliveryOrders.push(Object.keys(ICONS)[Math.floor(Math.random() * Object.keys(ICONS).length)]);
+      const matchableTiles = initializedPlayTiles.filter(t => t.baseIcon && !t.isGift);
+      const totalTilesCount = matchableTiles.length;
+      const maxOrdersAllowed = Math.max(1, Math.floor(totalTilesCount / 3) - 2);
+      if (sweetDelivery.endlessOrder) {
+        // Option 2: Order display according to the progression of level (top accessible layers to bottom)
+        const items = generateLevelProgressionOrders(
+          matchableTiles,
+          true,
+          sweetDelivery.maxOrders !== undefined ? sweetDelivery.maxOrders : undefined
+        );
+
+        // First 2 orders are active, the rest remain queued in level sequence
+        if (items[0]) items[0].status = 'active';
+        if (items[1]) items[1].status = 'active';
+
+        setDeliveryOrderItems(items);
+        setSweetDelivery(prev => ({
+          ...prev,
+          orders: items.map(it => it.icon),
+          orderItems: items
+        }));
+      } else {
+        const orderCount = Math.min(
+          maxOrdersAllowed,
+          Math.max(1, sweetDelivery.maxOrders !== undefined ? sweetDelivery.maxOrders : Math.min(4, maxOrdersAllowed))
+        );
+
+        const items = generateDeliveryOrdersFromBoard(
+          matchableTiles,
+          true, // Always capture color + icon from the level!
+          orderCount,
+          'active'
+        );
+
+        setDeliveryOrderItems(items);
+        setSweetDelivery(prev => ({
+          ...prev,
+          orders: items.map(it => it.icon),
+          orderItems: items
+        }));
       }
-      setSweetDelivery(prev => ({ ...prev, orders: deliveryOrders }));
+    } else {
+      setDeliveryOrderItems([]);
     }
 
     setIsLeftSidebarOpen(false);
     setIsRightPanelOpen(false);
+  };
+
+  const handleBossScrambleOrders = () => {
+    if (!sweetDelivery.enabled) return;
+
+    if (sweetDelivery.endlessOrder) {
+      setDeliveryOrderItems(prev => {
+        if (prev.length === 0) return prev;
+        // Keep completed orders intact, scramble uncompleted active and queued orders
+        const completed = prev.filter(o => o.status === 'completed');
+        const uncompleted = prev.filter(o => o.status !== 'completed');
+        const shuffled = [...uncompleted].sort(() => Math.random() - 0.5);
+
+        // First 2 become active, remaining become queued!
+        const reordered = shuffled.map((ord, idx) => ({
+          ...ord,
+          status: (idx < 2 ? 'active' : 'queued') as 'active' | 'queued'
+        }));
+
+        const result = [...reordered, ...completed];
+        
+        // If container has tiles that now match the newly active orders, transfer them!
+        const workingTray = [...container];
+        const updatedWithTray = transferMatchingTilesToSubTrays(workingTray, result, true);
+        setContainer(workingTray);
+
+        // Check if any order was completed by this transfer
+        updatedWithTray.forEach(ord => {
+          if ((ord.subTray?.length ?? 0) >= 3 && ord.status !== 'completed') {
+            ord.status = 'completed';
+          }
+          if (ord.status === 'completed' && !completedOrders.includes(ord.id)) {
+            setCompletedOrders(c => [...c, ord.id]);
+            if (bossBattle.enabled) {
+              setBossHP(hp => Math.max(0, hp - 25));
+            }
+          }
+        });
+
+        setSweetDelivery(sd => ({
+          ...sd,
+          orders: updatedWithTray.map(it => it.icon),
+          orderItems: updatedWithTray
+        }));
+        return updatedWithTray;
+      });
+      setNotificationMsg('🌀 BOSS SCRAMBLE! Active & queued delivery orders reshuffled!');
+      setTimeout(() => setNotificationMsg(null), 3500);
+    } else {
+      setSweetDelivery(prev => ({
+        ...prev,
+        orders: [...prev.orders].sort(() => Math.random() - 0.5)
+      }));
+      setDeliveryOrderItems(prev => {
+        const shuffled = [...prev].sort(() => Math.random() - 0.5);
+        return shuffled;
+      });
+      setNotificationMsg('🌀 BOSS SCRAMBLE! Delivery orders reshuffled!');
+      setTimeout(() => setNotificationMsg(null), 3500);
+    }
   };
 
   const stopPlayMode = () => {
@@ -998,7 +936,9 @@ export default function App() {
     const remainingGifts = workingBoard.filter(t => t.isGift);
     const totalGiftsInLevel = playTiles.filter(t => t.isGift).length;
     const allGiftsRevealed = totalGiftsInLevel > 0 && remainingGifts.length === 0;
-    const trayMax = 7 + slotExpandUsed;
+    const isEndless = sweetDelivery.enabled && sweetDelivery.endlessOrder;
+    const isTrayRestricted = sweetDelivery.enabled || bossBattle.enabled;
+    const trayMax = isEndless ? (4 + slotExpandUsed) : (isTrayRestricted ? (5 + slotExpandUsed) : (7 + slotExpandUsed));
 
     if (workingContainer.length >= trayMax) {
       setGameState('lost');
@@ -1238,42 +1178,170 @@ export default function App() {
 
     workingBoard = workingBoard.filter(t => !groupTiles.some(g => g.id === t.id));
     let workingContainer = [...container];
+    let workingDeliveryItems = [...deliveryOrderItems];
     let anyMatchOccurred = false;
     let matchedIcon: string | undefined = undefined;
+    let matchedColor: string | undefined = undefined;
     let matchedEventItemCount = 0;
     let matchedEventItemWithinWindow = 0;
+    let nextBossHP = bossHP;
+    let nextCompletedOrders = [...completedOrders];
 
-    groupTiles.forEach(gTile => {
-      const matchIndex = findLastIndex(workingContainer, (t: Tile) => t.baseIcon === gTile.baseIcon && t.color === gTile.color);
-      if (matchIndex !== -1) {
-        workingContainer.splice(matchIndex + 1, 0, gTile);
-      } else {
-        workingContainer.push(gTile);
-      }
+    if (sweetDelivery.enabled && sweetDelivery.endlessOrder) {
+      groupTiles.forEach(gTile => {
+        // Option 2: Endless Order will only account if the tiles also match the color + corresponding icon.
+        // Mismatch of one of the two will return the tiles to the tray until a suitable order comes, then place it on.
+        const matchIdx = workingDeliveryItems.findIndex(ord => {
+          if (ord.status !== 'active') return false;
+          if ((ord.subTray?.length ?? 0) >= 3) return false;
+          const orderColor = ord.color || 'yellow';
+          const tileColor = gTile.color || 'yellow';
+          return ord.icon === gTile.baseIcon && orderColor === tileColor;
+        });
 
-      for (let i = 0; i <= workingContainer.length - 3; i++) {
-        if (
-          workingContainer[i].baseIcon === workingContainer[i + 1].baseIcon &&
-          workingContainer[i].baseIcon === workingContainer[i + 2].baseIcon &&
-          workingContainer[i].color === workingContainer[i + 1].color &&
-          workingContainer[i].color === workingContainer[i + 2].color
-        ) {
-          const matchedTriplet = workingContainer.splice(i, 3);
-          anyMatchOccurred = true;
-          matchedIcon = matchedTriplet[0].baseIcon;
+        if (matchIdx !== -1) {
+          const matchedOrder = { ...workingDeliveryItems[matchIdx] };
+          matchedOrder.subTray = [...(matchedOrder.subTray || []), gTile];
 
-          matchedTriplet.forEach(mt => {
-            if (mt.mechanic === 'eventItem') {
-              matchedEventItemCount++;
-              if ((mt.movesRemaining ?? 0) > 0) {
-                matchedEventItemWithinWindow++;
-              }
+          if (matchedOrder.subTray.length >= 3) {
+            matchedOrder.status = 'completed';
+            if (!nextCompletedOrders.includes(matchedOrder.id)) {
+              nextCompletedOrders.push(matchedOrder.id);
             }
-          });
-          break;
+            if (bossBattle.enabled) {
+              // BOSS Battle mixed with Sweet Delivery: fulfilling an order deals damage!
+              nextBossHP = Math.max(0, nextBossHP - 25);
+              setBossHP(nextBossHP);
+              setNotificationMsg(`💥 ORDER DELIVERED! -25 Boss HP! (Boss: ${nextBossHP}%)`);
+            } else {
+              setNotificationMsg(`🍬 ORDER COMPLETED! (${matchedOrder.icon} • ${matchedOrder.color || 'yellow'})`);
+            }
+          }
+          workingDeliveryItems[matchIdx] = matchedOrder;
+        } else {
+          // Mismatch of color or icon -> return to main tray until a suitable order comes
+          const matchIndex = findLastIndex(workingContainer, (t: Tile) => t.baseIcon === gTile.baseIcon && t.color === gTile.color);
+          if (matchIndex !== -1) {
+            workingContainer.splice(matchIndex + 1, 0, gTile);
+          } else {
+            workingContainer.push(gTile);
+          }
+
+          // Check for 3-of-a-kind match in main tray (safety valve)
+          for (let i = 0; i <= workingContainer.length - 3; i++) {
+            if (
+              workingContainer[i].baseIcon === workingContainer[i + 1].baseIcon &&
+              workingContainer[i].baseIcon === workingContainer[i + 2].baseIcon &&
+              workingContainer[i].color === workingContainer[i + 1].color &&
+              workingContainer[i].color === workingContainer[i + 2].color
+            ) {
+              const matchedTriplet = workingContainer.splice(i, 3);
+              anyMatchOccurred = true;
+              matchedIcon = matchedTriplet[0].baseIcon;
+              matchedColor = matchedTriplet[0].color;
+              matchedTriplet.forEach(mt => {
+                if (mt.mechanic === 'eventItem') {
+                  matchedEventItemCount++;
+                  if ((mt.movesRemaining ?? 0) > 0) {
+                    matchedEventItemWithinWindow++;
+                  }
+                }
+              });
+              break;
+            }
+          }
+        }
+      });
+
+      // Endless Order: 4 orders appear, only 2 active first, other 2 inactive until previous 2 are complete.
+      let checkWave = true;
+      let iterations = 0;
+      while (checkWave && iterations < 10) {
+        iterations++;
+        checkWave = false;
+
+        // Transfer any matching tiles from tray to active orders (requiring BOTH color + icon match)
+        workingDeliveryItems = transferMatchingTilesToSubTrays(workingContainer, workingDeliveryItems, true);
+
+        // Check if any order was completed by this transfer
+        workingDeliveryItems.forEach(ord => {
+          if ((ord.subTray?.length ?? 0) >= 3 && ord.status !== 'completed') {
+            ord.status = 'completed';
+          }
+          if (ord.status === 'completed' && !nextCompletedOrders.includes(ord.id)) {
+            nextCompletedOrders.push(ord.id);
+            if (bossBattle.enabled) {
+              nextBossHP = Math.max(0, nextBossHP - 25);
+              setBossHP(nextBossHP);
+              setNotificationMsg(`💥 ORDER DELIVERED! -25 Boss HP! (Boss: ${nextBossHP}%)`);
+            } else {
+              setNotificationMsg(`🍬 ORDER COMPLETED! (${ord.icon} • ${ord.color || 'yellow'})`);
+            }
+          }
+        });
+
+        const activeUnfinished = workingDeliveryItems.filter(o => o.status === 'active' && (o.subTray?.length ?? 0) < 3);
+        if (activeUnfinished.length === 0) {
+          // All active orders in this wave are completed! Activate next 2 queued orders in level progression.
+          const queuedOrders = workingDeliveryItems.filter(o => o.status === 'queued');
+          if (queuedOrders.length > 0) {
+            const nextActive = queuedOrders.slice(0, 2);
+            const nextActiveIds = new Set(nextActive.map(na => na.id));
+            workingDeliveryItems = workingDeliveryItems.map(o => {
+              if (nextActiveIds.has(o.id)) {
+                return { ...o, status: 'active' as const };
+              }
+              return o;
+            });
+
+            setNotificationMsg('🎉 WAVE DELIVERED! Next level orders are now ACTIVE!');
+            checkWave = true; // Check if main tray tiles match newly active orders
+          }
         }
       }
-    });
+
+      setDeliveryOrderItems(workingDeliveryItems);
+      setCompletedOrders(nextCompletedOrders);
+      setSweetDelivery(sd => ({
+        ...sd,
+        orders: workingDeliveryItems.map(o => o.icon),
+        orderItems: workingDeliveryItems
+      }));
+    } else {
+      // Standard Sweet Delivery or Normal Play Mode
+      groupTiles.forEach(gTile => {
+        const matchIndex = findLastIndex(workingContainer, (t: Tile) => t.baseIcon === gTile.baseIcon && t.color === gTile.color);
+        if (matchIndex !== -1) {
+          workingContainer.splice(matchIndex + 1, 0, gTile);
+        } else {
+          workingContainer.push(gTile);
+        }
+
+        for (let i = 0; i <= workingContainer.length - 3; i++) {
+          if (
+            workingContainer[i].baseIcon === workingContainer[i + 1].baseIcon &&
+            workingContainer[i].baseIcon === workingContainer[i + 2].baseIcon &&
+            workingContainer[i].color === workingContainer[i + 1].color &&
+            workingContainer[i].color === workingContainer[i + 2].color
+          ) {
+            const matchedTriplet = workingContainer.splice(i, 3);
+            anyMatchOccurred = true;
+            matchedIcon = matchedTriplet[0].baseIcon;
+            matchedColor = matchedTriplet[0].color;
+
+            matchedTriplet.forEach(mt => {
+              if (mt.mechanic === 'eventItem') {
+                matchedEventItemCount++;
+                if ((mt.movesRemaining ?? 0) > 0) {
+                  matchedEventItemWithinWindow++;
+                }
+              }
+            });
+            break;
+          }
+        }
+      });
+    }
 
     const removedIds = new Set(groupTiles.map(t => t.id));
     workingBoard = workingBoard.map(t => {
@@ -1283,9 +1351,6 @@ export default function App() {
       }
       return t;
     });
-
-    let nextBossHP = bossHP;
-    let nextCompletedOrders = [...completedOrders];
 
     if (anyMatchOccurred) {
       // Ice mechanics matching
@@ -1343,19 +1408,62 @@ export default function App() {
         return nextCount;
       });
 
-      // BOSS Battle: Deplete Boss HP by 25
-      if (bossBattle.enabled) {
+      // BOSS Battle & Sweet Delivery synergy in standard mode
+      if (sweetDelivery.enabled && !sweetDelivery.endlessOrder) {
+        // Option 1: Color based Delivery - Only the same color and same icon of the delivery order is considered eligible to complete the order.
+        let fulfilledOrderIndex = -1;
+        if (sweetDelivery.colorBased) {
+          fulfilledOrderIndex = workingDeliveryItems.findIndex(ord =>
+            ord.status !== 'completed' &&
+            ord.icon === matchedIcon &&
+            ord.color === matchedColor
+          );
+        } else {
+          fulfilledOrderIndex = workingDeliveryItems.findIndex(ord =>
+            ord.status !== 'completed' &&
+            ord.icon === matchedIcon
+          );
+        }
+
+        if (fulfilledOrderIndex !== -1) {
+          const ord = { ...workingDeliveryItems[fulfilledOrderIndex], status: 'completed' as const };
+          workingDeliveryItems[fulfilledOrderIndex] = ord;
+          if (!nextCompletedOrders.includes(ord.id || ord.icon)) {
+            nextCompletedOrders = [...nextCompletedOrders, ord.id || ord.icon];
+            setCompletedOrders(nextCompletedOrders);
+          }
+          setDeliveryOrderItems(workingDeliveryItems);
+          setSweetDelivery(sd => ({
+            ...sd,
+            orderItems: workingDeliveryItems
+          }));
+
+          // BOSS Battle mixed with Sweet Delivery: fulfilling an order deals damage!
+          if (bossBattle.enabled) {
+            nextBossHP = Math.max(0, bossHP - 25);
+            setBossHP(nextBossHP);
+            setNotificationMsg(`💥 ORDER DELIVERED! -25 Boss HP! (Boss: ${nextBossHP}%)`);
+          } else {
+            setNotificationMsg(`🍬 ORDER COMPLETED! (${ord.icon}${sweetDelivery.colorBased ? ` - ${ord.color}` : ''})`);
+          }
+        }
+      } else if (bossBattle.enabled && !sweetDelivery.enabled) {
+        // Standard Boss Battle: fulfilling a match deals damage
         nextBossHP = Math.max(0, bossHP - 25);
         setBossHP(nextBossHP);
       }
+    }
 
-      // Sweet Delivery: Track completed orders
-      if (sweetDelivery.enabled && matchedIcon && sweetDelivery.orders.includes(matchedIcon)) {
-        if (!nextCompletedOrders.includes(matchedIcon)) {
-          nextCompletedOrders = [...nextCompletedOrders, matchedIcon];
-          setCompletedOrders(nextCompletedOrders);
+    // Boss Scramble moves tracking (every 6 moves, Boss scrambles the order of all orders)
+    if (bossBattle.enabled && sweetDelivery.enabled) {
+      setBossScrambleMovesCount(prev => {
+        const next = prev + 1;
+        if (next >= 6) {
+          handleBossScrambleOrders();
+          return 0;
         }
-      }
+        return next;
+      });
     }
 
     workingBoard = workingBoard.map(t => {
@@ -1399,12 +1507,14 @@ export default function App() {
     }
 
     // Determine tray max capacity
-    const trayMax = bossBattle.enabled || sweetDelivery.enabled ? (5 + slotExpandUsed) : (7 + slotExpandUsed);
+    const isEndless = sweetDelivery.enabled && sweetDelivery.endlessOrder;
+    const isTrayRestricted = sweetDelivery.enabled || bossBattle.enabled;
+    const trayMax = isEndless ? (4 + slotExpandUsed) : (isTrayRestricted ? (5 + slotExpandUsed) : (7 + slotExpandUsed));
     let bossFullTrayHandling = false;
 
     if (workingContainer.length >= trayMax) {
-      if (bossBattle.enabled) {
-        // Full tray in Boss Battle: Return 3 tiles to grid, shuffle board, player loses 25% HP
+      if (bossBattle.enabled && !isEndless) {
+        // Full tray in Boss Battle (non-endless): Return 3 tiles to grid, shuffle board, player loses 25% HP
         bossFullTrayHandling = true;
         const returned = workingContainer.splice(-3, 3);
         
@@ -1443,15 +1553,7 @@ export default function App() {
         }
 
         // Subtract player HP by 25
-        setPlayerHP(prev => {
-          const next = Math.max(0, prev - 25);
-          if (next <= 0) {
-            setGameState('lost');
-          }
-          return next;
-        });
-      } else {
-        setGameState('lost');
+        setPlayerHP(prev => Math.max(0, prev - 25));
       }
     }
 
@@ -1486,30 +1588,33 @@ export default function App() {
     const totalGiftsInLevel = giftsInLevel.length;
     const allGiftsRevealed = totalGiftsInLevel > 0 && remainingGifts.length === 0;
 
-    // Resolve Win/Lose State
+    // Resolve Win/Lose State: Win conditions have priority
     if (gameState === 'playing') {
-      if (sweetDelivery.enabled) {
-        if (nextCompletedOrders.length >= sweetDelivery.orders.length) {
-          setGameState('won');
-        } else if (workingContainer.length >= trayMax && !bossBattle.enabled) {
-          setGameState('lost');
-        }
-      } else if (bossBattle.enabled) {
-        if (nextBossHP <= 0) {
-          setGameState('won');
-        } else if (playerHP <= 25 && bossFullTrayHandling) { // Player HP drops to 0
-          setGameState('lost');
-        } else if (workingContainer.length >= trayMax && !bossBattle.enabled) {
-          setGameState('lost');
-        }
-      } else {
-        if (workingContainer.length >= trayMax) {
-          setGameState('lost');
-        } else if (totalGiftsInLevel > 0) {
-          if (allGiftsRevealed) setGameState('won');
-        } else {
-          if (remainingTiles.length === 0) setGameState('won');
-        }
+      const allEndlessOrdersFulfilled = sweetDelivery.enabled && sweetDelivery.endlessOrder &&
+        workingDeliveryItems.length > 0 &&
+        workingDeliveryItems.every(o => o.status === 'completed' || (o.subTray?.length ?? 0) >= 3);
+
+      const allOption1OrdersFulfilled = sweetDelivery.enabled && !sweetDelivery.endlessOrder &&
+        (nextCompletedOrders.length >= sweetDelivery.orders.length ||
+         (workingDeliveryItems.length > 0 && workingDeliveryItems.every(o => o.status === 'completed')));
+
+      if (bossBattle.enabled && nextBossHP <= 0) {
+        setGameState('won');
+      } else if (remainingTiles.length === 0) {
+        // Complete when all tiles are complete -> consider a win
+        setGameState('won');
+      } else if (sweetDelivery.enabled && sweetDelivery.endlessOrder && allEndlessOrdersFulfilled) {
+        // Complete when all orders fulfilled -> consider a win
+        setGameState('won');
+      } else if (allOption1OrdersFulfilled) {
+        setGameState('won');
+      } else if (totalGiftsInLevel > 0 && allGiftsRevealed) {
+        setGameState('won');
+      } else if (bossBattle.enabled && playerHP <= 25 && bossFullTrayHandling) {
+        setGameState('lost');
+      } else if (workingContainer.length >= trayMax) {
+        // Any deadlock on main tray (4 slots in Endless, 5 or 7 otherwise) becomes lose
+        setGameState('lost');
       }
     }
   };
@@ -1530,8 +1635,9 @@ export default function App() {
       return;
     }
 
-    if (giftPlacementMode) {
-      const size = GIFT_SIZES[giftPlacementMode];
+    if (selectedTool === 'gift' || giftPlacementMode) {
+      const placementSizeKey = giftPlacementMode || 'gift2x2';
+      const size = GIFT_SIZES[placementSizeKey] || GIFT_SIZES.gift2x2;
       if (!size) return;
 
       const snappedX = Math.floor(x / 2) * 2;
@@ -1540,28 +1646,31 @@ export default function App() {
       const endX = snappedX + (size.cols - 1) * 2;
       const endY = snappedY + (size.rows - 1) * 2;
       if (endX > 22 || endY > 22) {
-        alert(`Gift ${size.name} vượt quá biên. Chọn vị trí khác.`);
+        alert(`Gift ${size.name} exceeds grid boundaries. Pick another coordinate.`);
         return;
       }
 
       const giftZ = activeGiftLayer;
+      const themeConfig = GIFT_THEMES[activeGiftType] || GIFT_THEMES.golden;
 
       const newGift: Tile = {
         id: `gift-${generateId()}`,
         x: snappedX,
         y: snappedY,
         z: giftZ,
-        mechanic: giftPlacementMode,
+        mechanic: placementSizeKey,
         giftCols: size.cols,
         giftRows: size.rows,
+        giftType: activeGiftType,
+        giftVisual: themeConfig.visualId,
         isGift: true
       };
 
       const collides = tiles.some(t => {
         if (!t.isGift) return false;
         if (t.z !== giftZ) return false;
-        const tCols = GIFT_SIZES[t.mechanic || 'gift2x2']?.cols || t.giftCols || 2;
-        const tRows = GIFT_SIZES[t.mechanic || 'gift2x2']?.rows || t.giftRows || 2;
+        const tCols = GIFT_SIZES[t.mechanic || '']?.cols || t.giftCols || 2;
+        const tRows = GIFT_SIZES[t.mechanic || '']?.rows || t.giftRows || 2;
         const tWidth = (tCols - 1) * 2 + 1;
         const tHeight = (tRows - 1) * 2 + 1;
         const newWidth = (size.cols - 1) * 2 + 1;
@@ -1575,7 +1684,7 @@ export default function App() {
       });
 
       if (collides) {
-        alert('Vị trí này đã có Gift khác trên cùng Gift Layer.');
+        alert('Another Gift Box already occupies this position on this layer.');
         return;
       }
 
@@ -1625,6 +1734,7 @@ export default function App() {
           mechanic: mech,
           chainLevel: selectedMechanic === 'chained' ? chainLevel : undefined,
           iceMatchesRemaining: selectedMechanic === 'ice' ? iceMatchReq : undefined,
+          hiddenState: selectedMechanic === 'hidden' ? hiddenPlacementState : undefined,
           themeID: activeThemes[0],
           tripletGroupId: `tg-manual-${generateId()}`,
           movesRemaining: selectedMechanic === 'eventItem' ? 4 : undefined
@@ -1633,10 +1743,10 @@ export default function App() {
     } else if (selectedTool === 'erase') {
       const clickedTiles = tiles.filter(t => {
         if (t.isGift) {
-          const size = GIFT_SIZES[t.mechanic || 'gift2x1'];
-          if (!size) return false;
-          const endX = t.x + (size.cols - 1) * 2;
-          const endY = t.y + (size.rows - 1) * 2;
+          const tCols = GIFT_SIZES[t.mechanic || '']?.cols || t.giftCols || 2;
+          const tRows = GIFT_SIZES[t.mechanic || '']?.rows || t.giftRows || 2;
+          const endX = t.x + (tCols - 1) * 2;
+          const endY = t.y + (tRows - 1) * 2;
           return x >= t.x && x <= endX && y >= t.y && y <= endY;
         }
         return isOverlapping(t, { x, y }) && t.z === activeLayer;
@@ -1747,6 +1857,8 @@ export default function App() {
           mechanicData.moves_required = 4;
           mechanicData.collect_value_within_window = 2;
           mechanicData.collect_value_after_window = 1;
+        } else if (tile.mechanic === 'hidden') {
+          mechanicData.hidden_state = tile.hiddenState || 'safe';
         }
 
         item.special_mechanic = mechanicData;
@@ -1756,14 +1868,18 @@ export default function App() {
     });
 
     const serializedGiftItems = rawGifts.map(gift => {
-      const size = GIFT_SIZES[gift.mechanic || 'gift2x1'] || { cols: 2, rows: 1 };
+      const size = GIFT_SIZES[gift.mechanic || ''] || (gift.giftCols && gift.giftRows ? { cols: gift.giftCols, rows: gift.giftRows } : { cols: 2, rows: 1 });
+      const giftType = gift.giftType || 'golden';
+      const visual = gift.giftVisual ?? GIFT_THEMES[giftType]?.visualId ?? 0;
       return {
         entity_type: 'gift',
         gift_id: gift.id,
         x: gift.x,
         y: gift.y,
         z: gift.z,
-        size: { cols: size.cols, rows: size.rows }
+        size: { cols: size.cols, rows: size.rows },
+        gift_type: giftType,
+        visual
       };
     });
 
@@ -2031,11 +2147,17 @@ export default function App() {
       }
     }
 
+    const deliveryBase = sweetDelivery.enabled ? 20.0 : 0;
+    const deliveryColor = sweetDelivery.enabled && sweetDelivery.colorBased ? 12.0 : 0;
+    const deliveryEndless = sweetDelivery.enabled && sweetDelivery.endlessOrder ? 18.0 : 0;
+    const bossDeliverySynergy = bossBattle.enabled && sweetDelivery.enabled ? 15.0 : 0;
+    const totalDeliveryScore = deliveryBase + deliveryColor + deliveryEndless + bossDeliverySynergy;
+
     const boardSpecialMechs = {
       timerScore: boardTimer.enabled ? 15.0 * (60 / boardTimer.duration) : 0,
       randomScore: boardRandom.enabled ? -(15 - boardRandom.interval) : 0,
       bossScore: bossBattle.enabled ? 25.0 : 0,
-      deliveryScore: sweetDelivery.enabled ? 20.0 : 0,
+      deliveryScore: totalDeliveryScore,
       total: 0
     };
     boardSpecialMechs.total = boardSpecialMechs.timerScore + boardSpecialMechs.randomScore + boardSpecialMechs.bossScore + boardSpecialMechs.deliveryScore;
@@ -2208,12 +2330,17 @@ export default function App() {
           const { cols, rows } = t.size;
           const validSizes = [
             { cols: 2, rows: 1 },
+            { cols: 1, rows: 2 },
             { cols: 2, rows: 2 },
-            { cols: 2, rows: 3 }
+            { cols: 2, rows: 3 },
+            { cols: 3, rows: 2 },
+            { cols: 3, rows: 3 },
+            { cols: 4, rows: 4 }
           ];
-          const matchesValidSize = validSizes.some(s => s.cols === cols && s.rows === rows);
+          const matchesValidSize = validSizes.some(s => s.cols === cols && s.rows === rows) ||
+            (Number.isInteger(cols) && Number.isInteger(rows) && cols >= 1 && cols <= 6 && rows >= 1 && rows <= 6);
           if (!matchesValidSize) {
-            errors.push(`${prefix}: unsupported gift size ${cols}×${rows} (must be 2×1, 2×2, or 2×3)`);
+            errors.push(`${prefix}: unsupported gift size ${cols}×${rows} (must be between 1×1 and 6×6, e.g. 2×1, 2×2, 2×3, 3×2, 3×3, 4×4)`);
           }
         }
 
@@ -2223,7 +2350,9 @@ export default function App() {
           x: t.x,
           y: t.y,
           z: t.z,
-          size: t.size
+          size: t.size,
+          gift_type: t.gift_type || t.giftType || t.type,
+          visual: t.visual
         });
         return;
       }
@@ -2447,16 +2576,17 @@ export default function App() {
       }
       if (t.mechanic === 'hidden') {
         base.isRevealed = false;
+        base.hiddenState = t.mechanicData?.hidden_state || 'safe';
       }
 
       return base;
     });
 
     const convertedGifts: Tile[] = validatedGifts.map(g => {
-      let mechanic = 'gift2x1';
-      if (g.size.cols === 2 && g.size.rows === 2) mechanic = 'gift2x2';
-      if (g.size.cols === 2 && g.size.rows === 3) mechanic = 'gift2x3';
-      if (g.size.cols === 2 && g.size.rows === 1) mechanic = 'gift2x1';
+      const sizeKey = `gift${g.size.cols}x${g.size.rows}`;
+      const mechanic = GIFT_SIZES[sizeKey] ? sizeKey : `gift${g.size.cols}x${g.size.rows}`;
+      const giftType = g.gift_type || g.giftType || (g.visual !== undefined ? Object.keys(GIFT_THEMES).find(k => GIFT_THEMES[k].visualId === g.visual) : undefined) || 'golden';
+      const visual = g.visual ?? GIFT_THEMES[giftType]?.visualId ?? 0;
 
       return {
         id: g.gift_id || `import-gift-${generateId()}`,
@@ -2464,6 +2594,8 @@ export default function App() {
         mechanic,
         giftCols: g.size.cols,
         giftRows: g.size.rows,
+        giftType,
+        giftVisual: visual,
         isGift: true
       };
     });
@@ -2685,6 +2817,7 @@ export default function App() {
         container={container}
         slotExpandUsed={slotExpandUsed}
         sweetDeliveryEnabled={sweetDelivery.enabled}
+        sweetDeliveryEndless={sweetDelivery.endlessOrder}
         bossBattleEnabled={bossBattle.enabled}
         tiles={tiles}
         giftsRevealed={giftsRevealed}
@@ -2711,6 +2844,8 @@ export default function App() {
             setSelectedTool={setSelectedTool}
             giftPlacementMode={giftPlacementMode}
             setGiftPlacementMode={setGiftPlacementMode}
+            activeGiftType={activeGiftType}
+            setActiveGiftType={setActiveGiftType}
             activeLayer={activeLayer}
             setActiveLayer={setActiveLayer}
             activeGiftLayer={activeGiftLayer}
@@ -2746,6 +2881,8 @@ export default function App() {
             setShowOnlyUnbalanced={setShowOnlyUnbalanced}
             selectedMechanic={selectedMechanic}
             setSelectedMechanic={setSelectedMechanic}
+            hiddenPlacementState={hiddenPlacementState}
+            setHiddenPlacementState={setHiddenPlacementState}
             selectedCombineShapeId={selectedCombineShapeId}
             setSelectedCombineShapeId={setSelectedCombineShapeId}
             combineTileCountFilter={combineTileCountFilter}
@@ -2794,6 +2931,8 @@ export default function App() {
             onRedoEdit={handleEditRedo}
             canUndoEdit={canUndoEdit}
             canRedoEdit={canRedoEdit}
+            selectedTileIds={selectedTileIds}
+            setSelectedTileIds={setSelectedTileIds}
           />
 
           <BoardCanvas
@@ -2807,7 +2946,10 @@ export default function App() {
             activeLayer={activeLayer}
             activeGiftLayer={activeGiftLayer}
             giftPlacementMode={giftPlacementMode}
+            activeGiftType={activeGiftType}
             selectedTool={selectedTool}
+            selectedTileIds={selectedTileIds}
+            setSelectedTileIds={setSelectedTileIds}
             activeThemes={activeThemes}
             container={container}
             boosterInventory={boosterInventory}
@@ -2833,6 +2975,7 @@ export default function App() {
             selectedMechanic={selectedMechanic}
             selectedCombineShapeId={selectedCombineShapeId}
             boardMorphism={boardMorphism}
+            setBoardMorphism={setBoardMorphism}
             tileSpectrums={tileSpectrums}
             boardTimer={boardTimer}
             timeLeft={timeLeft}
@@ -2840,7 +2983,11 @@ export default function App() {
             bossHP={bossHP}
             playerHP={playerHP}
             sweetDelivery={sweetDelivery}
+            deliveryOrderItems={deliveryOrderItems}
             completedOrders={completedOrders}
+            bossScrambleMovesCount={bossScrambleMovesCount}
+            onBossScramble={handleBossScrambleOrders}
+            notificationMsg={notificationMsg}
             hasRevivedThisRun={hasRevivedThisRun}
             onRevive={handleRevive}
           />
@@ -2892,14 +3039,19 @@ export default function App() {
         )}
       </div>
 
+      /*
       <SuggestLevelModal
         isOpen={isSuggestModalOpen}
         onClose={() => setIsSuggestModalOpen(false)}
         suggestParams={suggestParams}
         setSuggestParams={setSuggestParams}
         executeSuggestLevel={executeSuggestLevel}
+        difficultyMods={difficultyMods}
+        currentDifficultyMod={difficultyMod}
+        currentLevelNum={levelNum}
       />
-
+      */
+      
       <ExportJsonModal
         isOpen={isExportModalOpen}
         onClose={() => setIsExportModalOpen(false)}
